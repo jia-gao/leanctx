@@ -18,6 +18,9 @@ venv/
 env/
 ENV/
 
+# uv
+uv.lock
+
 # Test / type / lint caches
 .pytest_cache/
 .ruff_cache/
