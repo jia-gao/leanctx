@@ -25,6 +25,11 @@ _OPENAI_INSTALL_HINT = (
     "Install with: pip install 'leanctx[openai]'"
 )
 
+_GEMINI_INSTALL_HINT = (
+    "The 'google-genai' package is required for leanctx.Gemini. "
+    "Install with: pip install 'leanctx[gemini]'"
+)
+
 
 def _load_anthropic() -> Any:
     try:
@@ -40,6 +45,14 @@ def _load_openai() -> Any:
     except ImportError as e:
         raise ImportError(_OPENAI_INSTALL_HINT) from e
     return openai
+
+
+def _load_gemini() -> Any:
+    try:
+        from google import genai
+    except ImportError as e:
+        raise ImportError(_GEMINI_INSTALL_HINT) from e
+    return genai
 
 
 class Anthropic:
@@ -119,11 +132,13 @@ class _AsyncMessages:
         return self._upstream.messages.stream(**kwargs)
 
 
-def _attach_telemetry(response: Any, stats: CompressionStats) -> None:
-    # Bypass Pydantic validation since `usage` is a frozen BaseModel field in
-    # both the anthropic and openai SDKs; object.__setattr__ sidesteps
-    # validators that would reject an unknown attribute.
-    usage = getattr(response, "usage", None)
+def _attach_telemetry(response: Any, stats: CompressionStats, field: str = "usage") -> None:
+    # Bypass Pydantic validation since the usage field is a frozen BaseModel
+    # in the anthropic/openai/google-genai SDKs; object.__setattr__ sidesteps
+    # validators that would reject an unknown attribute. The field name
+    # differs per provider: "usage" (anthropic, openai), "usage_metadata"
+    # (google-genai).
+    usage = getattr(response, field, None)
     if usage is None:
         return
     object.__setattr__(usage, "leanctx_tokens_saved", stats.input_tokens - stats.output_tokens)
@@ -254,3 +269,91 @@ class _AsyncCompletions:
         if upstream is None:
             raise AttributeError(name)
         return getattr(upstream.chat.completions, name)
+
+
+# --------------------------------------------------------------------------- #
+# Gemini (google-genai) wrapper
+# --------------------------------------------------------------------------- #
+#
+# Unlike Anthropic/OpenAI, google-genai has a single Client class that exposes
+# sync methods under `.models` and async variants under `.aio.models`. We match
+# that shape — one Gemini class, no AsyncGemini.
+#
+# In v0.0.x the generate_content intercept skips the Middleware: the message
+# shape differs (contents can be a string, list of strings, or Content objects
+# with parts). v0.1 will add a Gemini-aware normalization step before
+# dispatching to the shared Middleware.
+
+
+class Gemini:
+    """Drop-in replacement for ``google.genai.Client``.
+
+    Exposes sync methods at ``client.models`` and async methods at
+    ``client.aio.models``, matching the upstream SDK exactly. Only
+    ``generate_content`` is intercepted for telemetry in v0.0.x.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        leanctx_config: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        pkg = _load_gemini()
+        self._upstream = pkg.Client(*args, **kwargs)
+        self._middleware = Middleware(leanctx_config or {})
+        self.models = _GeminiModels(self._upstream, self._middleware)
+        self.aio = _GeminiAio(self._upstream, self._middleware)
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream, name)
+
+
+class _GeminiModels:
+    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+        self._upstream = upstream
+        self._middleware = middleware
+
+    def generate_content(self, *args: Any, **kwargs: Any) -> Any:
+        response = self._upstream.models.generate_content(*args, **kwargs)
+        _attach_telemetry(response, CompressionStats(), field="usage_metadata")
+        return response
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream.models, name)
+
+
+class _GeminiAio:
+    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+        self._upstream = upstream
+        self._middleware = middleware
+        self.models = _GeminiAsyncModels(upstream, middleware)
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream.aio, name)
+
+
+class _GeminiAsyncModels:
+    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+        self._upstream = upstream
+        self._middleware = middleware
+
+    async def generate_content(self, *args: Any, **kwargs: Any) -> Any:
+        response = await self._upstream.aio.models.generate_content(*args, **kwargs)
+        _attach_telemetry(response, CompressionStats(), field="usage_metadata")
+        return response
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream.aio.models, name)

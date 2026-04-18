@@ -7,7 +7,7 @@ real three-mode compression pipeline (local LLMLingua-2 / self_llm / hybrid).
 See https://github.com/jia-gao/leanctx for progress.
 """
 
-from leanctx.client import Anthropic, AsyncAnthropic, AsyncOpenAI, OpenAI
+from leanctx.client import Anthropic, AsyncAnthropic, AsyncOpenAI, Gemini, OpenAI
 from leanctx.middleware import CompressionStats, Middleware
 
 __version__ = "0.0.0"
@@ -17,6 +17,7 @@ __all__ = [
     "AsyncAnthropic",
     "AsyncOpenAI",
     "CompressionStats",
+    "Gemini",
     "Middleware",
     "OpenAI",
     "__version__",
