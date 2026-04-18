@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from leanctx.middleware import CompressionStats
+from leanctx.stats import CompressionStats
 from leanctx.tokens import count_message_tokens
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
-from leanctx.middleware import CompressionStats
+from leanctx.stats import CompressionStats
 
 
 class ContentType(str, Enum):

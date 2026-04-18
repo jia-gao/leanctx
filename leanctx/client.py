@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from leanctx.middleware import CompressionStats, Middleware
+from leanctx.middleware import Middleware
+from leanctx.stats import CompressionStats
 
 _ANTHROPIC_INSTALL_HINT = (
     "The 'anthropic' package is required for leanctx.Anthropic. "
