@@ -322,6 +322,11 @@ class _GeminiModels:
         _attach_telemetry(response, CompressionStats(), field="usage_metadata")
         return response
 
+    def generate_content_stream(self, *args: Any, **kwargs: Any) -> Any:
+        # Streaming returns an iterator of chunks; telemetry aggregation
+        # across the stream lands in v0.1. For now, pass through untouched.
+        return self._upstream.models.generate_content_stream(*args, **kwargs)
+
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
         if upstream is None:
@@ -351,6 +356,13 @@ class _GeminiAsyncModels:
         response = await self._upstream.aio.models.generate_content(*args, **kwargs)
         _attach_telemetry(response, CompressionStats(), field="usage_metadata")
         return response
+
+    def generate_content_stream(self, *args: Any, **kwargs: Any) -> Any:
+        # Upstream returns a coroutine that resolves to an async iterator.
+        # Forwarding it directly preserves that semantics — the caller
+        # awaits the result, then async-iterates. Not `async def` to avoid
+        # adding an extra coroutine layer.
+        return self._upstream.aio.models.generate_content_stream(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
