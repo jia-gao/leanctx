@@ -8,6 +8,7 @@ See https://github.com/jia-gao/leanctx for progress.
 """
 
 from leanctx.client import Anthropic, AsyncAnthropic, AsyncOpenAI, Gemini, OpenAI
+from leanctx.compressors import Compressor, ContentType, Verbatim
 from leanctx.middleware import CompressionStats, Middleware
 
 __version__ = "0.0.0"
@@ -17,8 +18,11 @@ __all__ = [
     "AsyncAnthropic",
     "AsyncOpenAI",
     "CompressionStats",
+    "Compressor",
+    "ContentType",
     "Gemini",
     "Middleware",
     "OpenAI",
+    "Verbatim",
     "__version__",
 ]
