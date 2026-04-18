@@ -17,6 +17,8 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
+from leanctx._content import get_text_content
+
 # Rough conversion used when tiktoken isn't installed. The 4:1 char:token
 # ratio is the conventional rule for English prose; code and non-English
 # text can drift 2x in either direction.
@@ -69,14 +71,4 @@ def count_message_tokens(
     Includes only the ``content`` field of each message; role tokens and
     per-message framing overhead are v0.1 work.
     """
-    total = 0
-    for msg in messages:
-        content = msg.get("content")
-        if isinstance(content, str):
-            total += count_tokens(content, model)
-        elif isinstance(content, list):
-            # Anthropic-style content blocks: [{"type": "text", "text": "..."}]
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    total += count_tokens(block.get("text", ""), model)
-    return total
+    return sum(count_tokens(get_text_content(msg), model) for msg in messages)
