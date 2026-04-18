@@ -42,11 +42,13 @@ anthropic = ["anthropic>=0.40.0"]
 openai = ["openai>=1.50.0"]
 gemini = ["google-genai>=0.3.0"]
 lingua = ["llmlingua>=0.2.0"]
+tokens = ["tiktoken>=0.7"]
 all = [
     "anthropic>=0.40.0",
     "openai>=1.50.0",
     "google-genai>=0.3.0",
     "llmlingua>=0.2.0",
+    "tiktoken>=0.7",
 ]
 dev = [
     "pytest>=8.0",
@@ -55,6 +57,7 @@ dev = [
     "mypy>=1.10",
     "build>=1.0",
     "twine>=5.0",
+    "tiktoken>=0.7",
 ]
 
 [project.urls]
