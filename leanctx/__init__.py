@@ -11,6 +11,7 @@ from leanctx.classifier import RepeatTracker, classify
 from leanctx.client import Anthropic, AsyncAnthropic, AsyncOpenAI, Gemini, OpenAI
 from leanctx.compressors import Compressor, ContentType, Verbatim
 from leanctx.middleware import CompressionStats, Middleware
+from leanctx.router import Router
 
 __version__ = "0.0.0"
 
@@ -25,6 +26,7 @@ __all__ = [
     "Middleware",
     "OpenAI",
     "RepeatTracker",
+    "Router",
     "Verbatim",
     "__version__",
     "classify",
