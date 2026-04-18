@@ -78,7 +78,7 @@ strict = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["anthropic", "anthropic.*"]
+module = ["anthropic", "anthropic.*", "openai", "openai.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

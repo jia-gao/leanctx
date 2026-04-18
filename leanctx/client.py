@@ -20,6 +20,11 @@ _ANTHROPIC_INSTALL_HINT = (
     "Install with: pip install 'leanctx[anthropic]'"
 )
 
+_OPENAI_INSTALL_HINT = (
+    "The 'openai' package is required for leanctx.OpenAI. "
+    "Install with: pip install 'leanctx[openai]'"
+)
+
 
 def _load_anthropic() -> Any:
     try:
@@ -27,6 +32,14 @@ def _load_anthropic() -> Any:
     except ImportError as e:
         raise ImportError(_ANTHROPIC_INSTALL_HINT) from e
     return anthropic
+
+
+def _load_openai() -> Any:
+    try:
+        import openai
+    except ImportError as e:
+        raise ImportError(_OPENAI_INSTALL_HINT) from e
+    return openai
 
 
 class Anthropic:
@@ -108,11 +121,136 @@ class _AsyncMessages:
 
 def _attach_telemetry(response: Any, stats: CompressionStats) -> None:
     # Bypass Pydantic validation since `usage` is a frozen BaseModel field in
-    # the anthropic SDK; object.__setattr__ sidesteps validators that would
-    # reject an unknown attribute.
+    # both the anthropic and openai SDKs; object.__setattr__ sidesteps
+    # validators that would reject an unknown attribute.
     usage = getattr(response, "usage", None)
     if usage is None:
         return
     object.__setattr__(usage, "leanctx_tokens_saved", stats.input_tokens - stats.output_tokens)
     object.__setattr__(usage, "leanctx_ratio", stats.ratio)
     object.__setattr__(usage, "leanctx_method", stats.method)
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI wrappers
+# --------------------------------------------------------------------------- #
+
+
+class OpenAI:
+    """Drop-in replacement for ``openai.OpenAI``.
+
+    Only ``chat.completions.create`` is intercepted for compression in v0.0.x
+    (and that path is a passthrough). Other attributes — ``embeddings``,
+    ``files``, ``completions`` (legacy), ``responses``, ``models``, etc. —
+    forward directly to the upstream client.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        leanctx_config: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        pkg = _load_openai()
+        self._upstream = pkg.OpenAI(*args, **kwargs)
+        self._middleware = Middleware(leanctx_config or {})
+        self.chat = _Chat(self._upstream, self._middleware)
+
+    def __getattr__(self, name: str) -> Any:
+        # __getattr__ fires only when normal lookup misses. Guard against the
+        # pre-init state where _upstream isn't in __dict__ yet (debuggers,
+        # pickling, autocomplete can poke at attrs before __init__ returns).
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream, name)
+
+
+class AsyncOpenAI:
+    """Async variant of :class:`OpenAI`."""
+
+    def __init__(
+        self,
+        *args: Any,
+        leanctx_config: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        pkg = _load_openai()
+        self._upstream = pkg.AsyncOpenAI(*args, **kwargs)
+        self._middleware = Middleware(leanctx_config or {})
+        self.chat = _AsyncChat(self._upstream, self._middleware)
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream, name)
+
+
+class _Chat:
+    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+        self._upstream = upstream
+        self._middleware = middleware
+        self.completions = _Completions(upstream, middleware)
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream.chat, name)
+
+
+class _AsyncChat:
+    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+        self._upstream = upstream
+        self._middleware = middleware
+        self.completions = _AsyncCompletions(upstream, middleware)
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream.chat, name)
+
+
+class _Completions:
+    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+        self._upstream = upstream
+        self._middleware = middleware
+
+    def create(self, **kwargs: Any) -> Any:
+        messages = kwargs.get("messages", [])
+        compressed, stats = self._middleware.compress_messages(messages)
+        kwargs["messages"] = compressed
+        # Returns the non-stream response or a Stream iterator depending on
+        # kwargs["stream"]. Either way the upstream return value is correct;
+        # telemetry attaches only when a concrete response with .usage exists.
+        response = self._upstream.chat.completions.create(**kwargs)
+        _attach_telemetry(response, stats)
+        return response
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream.chat.completions, name)
+
+
+class _AsyncCompletions:
+    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+        self._upstream = upstream
+        self._middleware = middleware
+
+    async def create(self, **kwargs: Any) -> Any:
+        messages = kwargs.get("messages", [])
+        compressed, stats = await self._middleware.compress_messages_async(messages)
+        kwargs["messages"] = compressed
+        response = await self._upstream.chat.completions.create(**kwargs)
+        _attach_telemetry(response, stats)
+        return response
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream.chat.completions, name)
