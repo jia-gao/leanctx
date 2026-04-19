@@ -53,6 +53,67 @@ def test_dedup_reset_is_a_noop() -> None:
     assert s.apply([msg, msg]) == [msg]
 
 
+def test_dedup_preserves_different_roles_with_same_content() -> None:
+    # Regression for the role-aware hash: "ok" from the user and "ok"
+    # from the assistant are distinct turns, not duplicates.
+    s = DedupStrategy()
+    messages = [
+        {"role": "user", "content": "ok"},
+        {"role": "assistant", "content": "ok"},
+    ]
+    assert s.apply(messages) == messages
+
+
+def test_dedup_still_drops_duplicates_within_same_role() -> None:
+    s = DedupStrategy()
+    messages = [
+        {"role": "user", "content": "same question"},
+        {"role": "user", "content": "same question"},
+    ]
+    out = s.apply(messages)
+    assert len(out) == 1
+
+
+def test_dedup_skips_tool_result_messages() -> None:
+    # Dropping a tool_result would orphan the matching tool_use — unsafe.
+    s = DedupStrategy()
+    tool_result = {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "1", "content": "done"},
+        ],
+    }
+    # Two tool_results with identical content but different tool_use_ids
+    # would technically have the same text hash, but we never hash tool-
+    # linked messages. Both survive.
+    tool_result_b = {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "2", "content": "done"},
+        ],
+    }
+    out = s.apply([tool_result, tool_result_b])
+    assert len(out) == 2
+
+
+def test_dedup_skips_tool_use_messages() -> None:
+    s = DedupStrategy()
+    tool_use = {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "1", "name": "ls", "input": {"path": "/"}},
+        ],
+    }
+    tool_use_b = {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "2", "name": "ls", "input": {"path": "/"}},
+        ],
+    }
+    out = s.apply([tool_use, tool_use_b])
+    assert len(out) == 2
+
+
 # --------------------------------------------------------------------------- #
 # PurgeErrorsStrategy
 # --------------------------------------------------------------------------- #

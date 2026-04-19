@@ -133,3 +133,26 @@ def test_from_dicts_produces_langchain_messages() -> None:
     assert isinstance(lc_messages[2], AIMessage)
     assert lc_messages[0].content == "s"
     assert lc_messages[2].content == "a"
+
+
+@pytest.mark.skipif(not LANGCHAIN_AVAILABLE, reason="langchain_core required")
+def test_from_dicts_round_trips_tool_calls_on_ai_message() -> None:
+    from langchain_core.messages import AIMessage
+
+    tool_calls = [{"id": "call_1", "name": "read_file", "args": {"path": "x"}}]
+    lc_messages = from_dicts(
+        [{"role": "assistant", "content": "calling", "tool_calls": tool_calls}]
+    )
+    assert isinstance(lc_messages[0], AIMessage)
+    assert lc_messages[0].tool_calls == tool_calls
+
+
+@pytest.mark.skipif(not LANGCHAIN_AVAILABLE, reason="langchain_core required")
+def test_from_dicts_round_trips_tool_call_id_on_tool_message() -> None:
+    from langchain_core.messages import ToolMessage
+
+    lc_messages = from_dicts(
+        [{"role": "tool", "content": "grep output", "tool_call_id": "call_42"}]
+    )
+    assert isinstance(lc_messages[0], ToolMessage)
+    assert lc_messages[0].tool_call_id == "call_42"

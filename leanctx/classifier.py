@@ -127,7 +127,29 @@ class RepeatTracker:
 
     @staticmethod
     def _hash(message: dict[str, Any]) -> str:
+        # Skip messages that carry tool-use linkage: tool_use and
+        # tool_result blocks pair by id, so dropping a "duplicate"
+        # tool_result would orphan the matching tool_use in the
+        # preceding assistant message. Always return "" here, which the
+        # caller treats as "never flag this message".
+        if _has_tool_linkage(message):
+            return ""
         text = get_text_content(message)
         if not text:
             return ""
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        # Include role so a user "ok" and an assistant "ok" don't collapse
+        # into one message — those are distinct turns in the conversation.
+        role = message.get("role", "")
+        payload = f"{role}|{text}".encode()
+        return hashlib.sha256(payload).hexdigest()
+
+
+def _has_tool_linkage(message: dict[str, Any]) -> bool:
+    """True if this message contains tool_use or tool_result blocks."""
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict) and block.get("type") in ("tool_use", "tool_result")
+        for block in content
+    )

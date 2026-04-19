@@ -120,10 +120,15 @@ def from_dicts(dicts: list[dict[str, Any]]) -> list[Any]:
         cls = role_map.get(role, HumanMessage)
         content = d.get("content", "")
         if cls is ToolMessage:
-            # ToolMessage needs tool_call_id; fall back to empty string
-            # when the dict doesn't carry one. v0.2 will preserve
-            # tool_call_id through compression round-trips.
             out.append(cls(content=content, tool_call_id=d.get("tool_call_id", "")))
+        elif cls is AIMessage:
+            # Round-trip tool_calls when present so assistant->tool linkage
+            # survives. LangChain's AIMessage accepts tool_calls: list of
+            # {name, args, id} dicts.
+            ai_kwargs: dict[str, Any] = {"content": content}
+            if "tool_calls" in d:
+                ai_kwargs["tool_calls"] = d["tool_calls"]
+            out.append(cls(**ai_kwargs))
         else:
             out.append(cls(content=content))
     return out
