@@ -16,8 +16,9 @@ Your prompts and user data never leave your infrastructure by default.
 
 ---
 
-> **Status:** v0.0.0 — name reservation. v0.1 (working release) coming in ~4 weeks.
-> [Watch the repo](https://github.com/jia-gao/leanctx/subscription) to be notified.
+> **Status:** v0.1 code is **feature-complete on `main`**. PyPI / npm still
+> carry the `0.0.0` reservation while the `0.1.0` release is finalized.
+> Track progress in the [roadmap](#roadmap) below.
 
 ## Who this is for
 
@@ -31,7 +32,7 @@ You're building a production LLM app and your token bill is a line item:
 
 If your code calls `anthropic.messages.create()` or `openai.chat.completions.create()` in production, this is for you.
 
-## How it works (coming in v0.1)
+## How it works
 
 Three compression modes, one config switch:
 
@@ -41,24 +42,101 @@ Three compression modes, one config switch:
 
 Content-aware routing means code blocks, diffs, stack traces, and tool schemas are preserved verbatim — no corrupted syntax.
 
+```python
+from leanctx import Anthropic
+
+client = Anthropic(leanctx_config={
+    "mode": "on",
+    "trigger": {"threshold_tokens": 2000},
+    "routing": {
+        "code":           "verbatim",   # never touch code
+        "error":          "verbatim",   # never touch stack traces
+        "prose":          "lingua",     # local LLMLingua-2
+        "long_important": "selfllm",    # cheap LLM summarization
+    },
+    "lingua":  {"ratio": 0.5, "device": "cpu"},
+    "selfllm": {"model": "claude-haiku-4-5", "api_key": "sk-...", "ratio": 0.3},
+})
+
+response = client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": long_document}],
+)
+
+# Compression telemetry attached to the response
+print(response.usage.leanctx_tokens_saved)
+print(response.usage.leanctx_ratio)
+```
+
+## Real compression numbers
+
+Measured end-to-end with the real LLMLingua-2 model (`scripts/integration_test_e2e.py`):
+
+- 4,450 chars in → 2,462 chars sent on the wire to `api.anthropic.com` (**44.7% reduction**)
+- 395 tokens saved per request at `mode="on", ratio=0.5`
+- `response.usage.leanctx_method == "lingua"` verifies the pipeline executed
+
 ## Roadmap
 
-- [ ] v0.1 — Python SDK, `local` mode (LLMLingua-2), Anthropic + OpenAI drop-in clients
-- [ ] v0.2 — `self_llm` mode, Gemini client, LangChain / LlamaIndex integrations
-- [ ] v0.3 — TypeScript SDK, Docker image, OTel observability
-- [ ] v0.4 — Helm chart, Kubernetes sidecar deployment
+- [x] v0.1 — Python SDK, drop-in Anthropic/OpenAI/Gemini wrappers, `local` (LLMLingua-2) + `self_llm` (Anthropic), content classifier, router, dedup + purge-errors strategies, LangChain format helpers, Docker image
+- [ ] v0.1.0 release — bump version, publish to PyPI + npm (placeholders at 0.0.0 today)
+- [ ] v0.2 — `self_llm` for OpenAI / Gemini providers, full LangChain drop-in ChatAnthropic subclass, LlamaIndex integration, TypeScript SDK compression port (currently skeleton only)
+- [ ] v0.3 — OTel observability, benchmark harness, ghcr.io Docker publish workflow, OpenAI responses-API intercept
+- [ ] v0.4 — Helm chart, Kubernetes sidecar proxy deployment, stateful session dedup
 
-## Install (placeholder)
+## Install
 
 ```bash
-pip install leanctx  # not yet functional — reservation only
+# Once v0.1.0 is published:
+pip install leanctx
+pip install 'leanctx[anthropic,openai,gemini]'  # pick your providers
+pip install 'leanctx[lingua]'                   # + LLMLingua-2 local compression
+pip install 'leanctx[all]'                      # everything
+
+# Today (from source, main branch):
+pip install git+https://github.com/jia-gao/leanctx.git
+```
+
+Docker images:
+
+```bash
+docker build -t leanctx:slim .                             # 341 MB, all provider SDKs
+docker build -t leanctx:lingua --build-arg LINGUA=true .   # + LLMLingua-2, ~3 GB
+```
+
+## Supported providers
+
+| Provider | Drop-in client | Streaming | SelfLLM target |
+|---|:-:|:-:|:-:|
+| Anthropic | ✅ `leanctx.Anthropic` / `AsyncAnthropic` | ✅ | ✅ |
+| OpenAI    | ✅ `leanctx.OpenAI` / `AsyncOpenAI` | ✅ | v0.2 |
+| Gemini    | ✅ `leanctx.Gemini` (`.models` + `.aio.models`) | ✅ | v0.2 |
+
+## Architecture
+
+```
+your code
+   ↓
+leanctx.Anthropic / OpenAI / Gemini
+   ↓
+Middleware
+   ├── Strategies (deterministic, no LLM):
+   │     DedupStrategy, PurgeErrorsStrategy
+   ↓
+   ├── Per-message pipeline:
+   │     classify → router → compressor
+   ↓
+Compressor:  Verbatim | Lingua (LLMLingua-2) | SelfLLM (your LLM)
+   ↓
+real Anthropic / OpenAI / Gemini SDK → API
 ```
 
 ## Credits
 
-Architecturally inspired by [OpenCode DCP](https://github.com/Opencode-DCP/opencode-dynamic-context-pruning) (AGPL-3.0, not copied). leanctx is a clean-room implementation under MIT.
+Architecturally inspired by [OpenCode DCP](https://github.com/Opencode-DCP/opencode-dynamic-context-pruning) (AGPL-3.0, not copied). leanctx is a clean-room MIT implementation.
 
-Ships Microsoft's [LLMLingua-2](https://huggingface.co/microsoft/llmlingua-2-xlm-roberta-large-meetingbank) (MIT).
+Ships Microsoft's [LLMLingua-2](https://huggingface.co/microsoft/llmlingua-2-xlm-roberta-large-meetingbank) (MIT) as an optional extra.
 
 ## License
 
