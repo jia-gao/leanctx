@@ -54,10 +54,19 @@ def test_selfllm_defaults() -> None:
     assert llm.max_summary_tokens == 500
 
 
-def test_selfllm_unsupported_provider_raises() -> None:
-    llm = SelfLLM(provider="cohere")
+def test_selfllm_unsupported_provider_raises_at_construction() -> None:
     with pytest.raises(ValueError, match="not supported"):
-        llm.compress([{"role": "user", "content": "trigger load"}])
+        SelfLLM(provider="cohere")
+
+
+def test_selfllm_default_model_resolves_per_provider() -> None:
+    assert SelfLLM(provider="anthropic").model.startswith("claude-haiku")
+    assert SelfLLM(provider="openai").model.startswith("gpt-")
+    assert SelfLLM(provider="gemini").model.startswith("gemini-")
+
+
+def test_selfllm_explicit_model_wins_over_default() -> None:
+    assert SelfLLM(provider="openai", model="gpt-5.3-codex").model == "gpt-5.3-codex"
 
 
 # --------------------------------------------------------------------------- #
@@ -168,3 +177,135 @@ def test_selfllm_raises_import_error_when_anthropic_missing() -> None:
     llm = SelfLLM()
     with pytest.raises(ImportError, match="'anthropic' package"):
         llm.compress([{"role": "user", "content": "trigger load"}])
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI provider
+# --------------------------------------------------------------------------- #
+
+
+def _fake_openai_response(
+    *, text: str = "openai summary", prompt_tokens: int = 150, completion_tokens: int = 15
+) -> SimpleNamespace:
+    """Quacks like openai.types.chat.ChatCompletion."""
+    message = SimpleNamespace(content=text, role="assistant")
+    choice = SimpleNamespace(message=message, index=0, finish_reason="stop")
+    usage = SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+    return SimpleNamespace(choices=[choice], usage=usage, model="gpt-5-nano")
+
+
+def test_selfllm_openai_compresses_via_mock() -> None:
+    llm = SelfLLM(provider="openai")
+    fake = MagicMock()
+    fake.chat.completions.create.return_value = _fake_openai_response(
+        text="compact", prompt_tokens=200, completion_tokens=20
+    )
+    llm._client = fake
+
+    messages = [{"role": "user", "content": "long input " * 40}]
+    out, stats = llm.compress(messages)
+
+    assert out[0]["content"] == "compact"
+    assert stats.method == "selfllm"
+    assert stats.input_tokens == 200
+    assert stats.output_tokens == 20
+    assert stats.ratio == pytest.approx(0.1)
+
+
+def test_selfllm_openai_passes_system_and_user_messages() -> None:
+    llm = SelfLLM(provider="openai", max_summary_tokens=300)
+    fake = MagicMock()
+    fake.chat.completions.create.return_value = _fake_openai_response()
+    llm._client = fake
+
+    llm.compress([{"role": "user", "content": "payload"}])
+
+    kwargs = fake.chat.completions.create.call_args.kwargs
+    # System prompt goes in the messages list for OpenAI, not as a param.
+    assert kwargs["messages"][0]["role"] == "system"
+    assert kwargs["messages"][1]["role"] == "user"
+    assert kwargs["max_completion_tokens"] == 300
+
+
+def test_selfllm_openai_empty_choices_handled() -> None:
+    llm = SelfLLM(provider="openai")
+    fake = MagicMock()
+    # Rare but real: provider returns no choices (content filter, etc.)
+    fake.chat.completions.create.return_value = SimpleNamespace(
+        choices=[], usage=SimpleNamespace(prompt_tokens=5, completion_tokens=0)
+    )
+    llm._client = fake
+
+    out, stats = llm.compress([{"role": "user", "content": "x"}])
+    assert out[0]["content"] == ""
+    assert stats.output_tokens == 0
+
+
+# --------------------------------------------------------------------------- #
+# Gemini provider
+# --------------------------------------------------------------------------- #
+
+
+def _fake_gemini_response(
+    *,
+    text: str = "gemini summary",
+    prompt_token_count: int = 180,
+    candidates_token_count: int = 18,
+) -> SimpleNamespace:
+    """Quacks like google.genai types.GenerateContentResponse."""
+    usage = SimpleNamespace(
+        prompt_token_count=prompt_token_count,
+        candidates_token_count=candidates_token_count,
+        total_token_count=prompt_token_count + candidates_token_count,
+    )
+    return SimpleNamespace(text=text, usage_metadata=usage)
+
+
+def test_selfllm_gemini_compresses_via_mock() -> None:
+    llm = SelfLLM(provider="gemini")
+    fake = MagicMock()
+    fake.models.generate_content.return_value = _fake_gemini_response(
+        text="compact", prompt_token_count=200, candidates_token_count=20
+    )
+    llm._client = fake
+
+    messages = [{"role": "user", "content": "long input " * 40}]
+    out, stats = llm.compress(messages)
+
+    assert out[0]["content"] == "compact"
+    assert stats.method == "selfllm"
+    assert stats.input_tokens == 200
+    assert stats.output_tokens == 20
+
+
+def test_selfllm_gemini_uses_system_instruction_in_config() -> None:
+    llm = SelfLLM(provider="gemini", max_summary_tokens=250)
+    fake = MagicMock()
+    fake.models.generate_content.return_value = _fake_gemini_response()
+    llm._client = fake
+
+    llm.compress([{"role": "user", "content": "payload"}])
+
+    kwargs = fake.models.generate_content.call_args.kwargs
+    assert kwargs["model"].startswith("gemini-")
+    assert "system_instruction" in kwargs["config"]
+    assert kwargs["config"]["max_output_tokens"] == 250
+
+
+def test_selfllm_gemini_missing_usage_metadata_handled() -> None:
+    llm = SelfLLM(provider="gemini")
+    fake = MagicMock()
+    # Gemini streaming aggregates or errored responses may lack usage.
+    fake.models.generate_content.return_value = SimpleNamespace(
+        text="ok", usage_metadata=None
+    )
+    llm._client = fake
+
+    out, stats = llm.compress([{"role": "user", "content": "x"}])
+    assert out[0]["content"] == "ok"
+    assert stats.input_tokens == 0
+    assert stats.output_tokens == 0
