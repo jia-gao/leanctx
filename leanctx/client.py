@@ -60,8 +60,9 @@ class Anthropic:
     """Drop-in replacement for ``anthropic.Anthropic``.
 
     Accepts the same positional / keyword args as the upstream SDK, plus a
-    ``leanctx_config`` kwarg that configures the compression pipeline
-    (no-op in v0.0.x).
+    ``leanctx_config`` kwarg that configures the compression pipeline.
+    Non-intercepted attributes (``beta``, ``models``, ``batches``, etc.)
+    forward to the upstream client via ``__getattr__``.
     """
 
     def __init__(
@@ -74,6 +75,12 @@ class Anthropic:
         self._upstream = pkg.Anthropic(*args, **kwargs)
         self._middleware = Middleware(leanctx_config or {})
         self.messages = _Messages(self._upstream, self._middleware)
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream, name)
 
 
 class AsyncAnthropic:
@@ -89,6 +96,12 @@ class AsyncAnthropic:
         self._upstream = pkg.AsyncAnthropic(*args, **kwargs)
         self._middleware = Middleware(leanctx_config or {})
         self.messages = _AsyncMessages(self._upstream, self._middleware)
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self.__dict__.get("_upstream")
+        if upstream is None:
+            raise AttributeError(name)
+        return getattr(upstream, name)
 
 
 class _Messages:
@@ -125,12 +138,46 @@ class _AsyncMessages:
         return response
 
     def stream(self, **kwargs: Any) -> Any:
-        # The upstream returns a context manager for streaming, not a coroutine,
-        # so we forward it directly rather than awaiting.
-        messages = kwargs.get("messages", [])
-        compressed, _ = self._middleware.compress_messages(messages)
-        kwargs["messages"] = compressed
-        return self._upstream.messages.stream(**kwargs)
+        # Returns an async context manager. Compression runs at __aenter__
+        # time via compress_messages_async so the event loop isn't blocked
+        # while Lingua runs the model (or SelfLLM calls its upstream LLM).
+        return _AsyncStreamContextManager(
+            self._upstream.messages, kwargs, self._middleware
+        )
+
+
+class _AsyncStreamContextManager:
+    """Wraps ``anthropic.AsyncAnthropic.messages.stream`` so compression
+    happens on ``__aenter__``, not at the synchronous ``stream()`` call.
+
+    Without this, async streaming would block the event loop on the
+    compression step — defeating the point of the async client.
+    """
+
+    def __init__(
+        self,
+        upstream_messages: Any,
+        kwargs: dict[str, Any],
+        middleware: Middleware,
+    ) -> None:
+        self._upstream_messages = upstream_messages
+        self._kwargs = kwargs
+        self._middleware = middleware
+        self._upstream_cm: Any = None
+
+    async def __aenter__(self) -> Any:
+        messages = self._kwargs.get("messages", [])
+        compressed, _ = await self._middleware.compress_messages_async(messages)
+        self._kwargs["messages"] = compressed
+        self._upstream_cm = self._upstream_messages.stream(**self._kwargs)
+        return await self._upstream_cm.__aenter__()
+
+    async def __aexit__(
+        self, exc_type: Any, exc_val: Any, exc_tb: Any
+    ) -> Any:
+        if self._upstream_cm is None:
+            return None
+        return await self._upstream_cm.__aexit__(exc_type, exc_val, exc_tb)
 
 
 def _attach_telemetry(response: Any, stats: CompressionStats, field: str = "usage") -> None:

@@ -5,7 +5,7 @@ clients, so they run without the real anthropic / openai / google-genai
 packages installed and without any network.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -39,16 +39,28 @@ def test_anthropic_stream_forwards_to_upstream() -> None:
 
 @pytest.mark.asyncio
 async def test_anthropic_async_stream_forwards_to_upstream() -> None:
+    # The new _AsyncStreamContextManager defers the upstream call until
+    # __aenter__ so compression can run on the async middleware path
+    # without blocking the event loop. The test exercises the full
+    # async-with flow.
     upstream = MagicMock()
+    upstream_cm = MagicMock()
+    upstream_cm.__aenter__ = AsyncMock(return_value="streaming_handle")
+    upstream_cm.__aexit__ = AsyncMock(return_value=None)
+    upstream.messages.stream = MagicMock(return_value=upstream_cm)
+
     wrapper = _AsyncMessages(upstream, Middleware({}))
     messages = [{"role": "user", "content": "hi"}]
 
-    result = wrapper.stream(model="claude-sonnet-4-6", messages=messages, max_tokens=10)
+    cm = wrapper.stream(model="claude-sonnet-4-6", messages=messages, max_tokens=10)
+    async with cm as handle:
+        assert handle == "streaming_handle"
 
     upstream.messages.stream.assert_called_once_with(
         model="claude-sonnet-4-6", messages=messages, max_tokens=10
     )
-    assert result is upstream.messages.stream.return_value
+    upstream_cm.__aenter__.assert_awaited_once()
+    upstream_cm.__aexit__.assert_awaited_once()
 
 
 # --------------------------------------------------------------------------- #

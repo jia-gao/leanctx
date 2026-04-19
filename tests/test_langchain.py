@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -70,6 +71,44 @@ def test_to_dicts_round_trip_with_compressible_content() -> None:
         {"role": "user", "content": "question"},
         {"role": "assistant", "content": "answer"},
     ]
+
+
+def test_to_dicts_preserves_tool_call_id() -> None:
+    @dataclass
+    class _FakeToolMsg:
+        type: str
+        content: str
+        tool_call_id: str
+
+    msgs = [_FakeToolMsg(type="tool", content="grep output", tool_call_id="call_42")]
+    dicts = to_dicts(msgs)
+    assert dicts[0]["role"] == "tool"
+    assert dicts[0]["tool_call_id"] == "call_42"
+
+
+def test_to_dicts_preserves_tool_calls_on_ai_message() -> None:
+    @dataclass
+    class _FakeAIWithTools:
+        type: str
+        content: str
+        tool_calls: list[dict[str, Any]]
+
+    calls = [{"id": "call_1", "name": "read_file", "args": {"path": "x"}}]
+    msgs = [_FakeAIWithTools(type="ai", content="calling read_file", tool_calls=calls)]
+    dicts = to_dicts(msgs)
+    assert dicts[0]["tool_calls"] == calls
+
+
+def test_to_dicts_preserves_name_on_function_message() -> None:
+    @dataclass
+    class _FakeFuncMsg:
+        type: str
+        content: str
+        name: str
+
+    msgs = [_FakeFuncMsg(type="function", content="result", name="do_thing")]
+    dicts = to_dicts(msgs)
+    assert dicts[0]["name"] == "do_thing"
 
 
 @pytest.mark.skipif(LANGCHAIN_AVAILABLE, reason="langchain_core is installed")

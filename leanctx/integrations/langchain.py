@@ -56,13 +56,36 @@ def to_dicts(messages: list[Any]) -> list[dict[str, Any]]:
     Duck-typed: reads ``msg.type`` and ``msg.content`` without importing
     LangChain. Unknown types pass through as their own role string so
     users can experiment with custom message types.
+
+    Tool-use metadata is preserved where present:
+
+    * ``tool_call_id`` on ``ToolMessage`` — needed for the result to
+      link back to the matching ``tool_calls`` entry on the preceding
+      assistant message. Round-trips via :func:`from_dicts`.
+    * ``name`` on ``FunctionMessage`` / ``ToolMessage`` — optional.
+
+    ``AIMessage.tool_calls`` round-tripping is a known v0.2 gap —
+    preserved here as a best-effort extra key; :func:`from_dicts`
+    currently reconstructs a plain ``AIMessage`` without them.
     """
     out: list[dict[str, Any]] = []
     for m in messages:
         mtype = getattr(m, "type", None) or "user"
         role = _LC_TYPE_TO_ROLE.get(mtype, mtype)
-        content = getattr(m, "content", "")
-        out.append({"role": role, "content": content})
+        d: dict[str, Any] = {
+            "role": role,
+            "content": getattr(m, "content", ""),
+        }
+        tool_call_id = getattr(m, "tool_call_id", None)
+        if tool_call_id:
+            d["tool_call_id"] = tool_call_id
+        name = getattr(m, "name", None)
+        if name:
+            d["name"] = name
+        tool_calls = getattr(m, "tool_calls", None)
+        if tool_calls:
+            d["tool_calls"] = tool_calls
+        out.append(d)
     return out
 
 
