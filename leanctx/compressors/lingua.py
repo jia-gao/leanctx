@@ -31,6 +31,23 @@ _LINGUA_INSTALL_HINT = (
 _DEFAULT_MODEL = "microsoft/llmlingua-2-xlm-roberta-large-meetingbank"
 
 
+def _auto_device() -> str:
+    """Pick the best available device. CUDA > MPS (Apple Silicon) > CPU.
+
+    LLMLingua's default is ``device_map="cuda"``, which blows up on machines
+    without a CUDA GPU. We detect and fall back before handing off.
+    """
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 class Lingua:
     """Extractive compressor backed by LLMLingua-2.
 
@@ -46,11 +63,16 @@ class Lingua:
         self,
         model: str = _DEFAULT_MODEL,
         ratio: float = 0.5,
+        device: str | None = None,
     ) -> None:
         self.model = model
         # Same meaning as LLMLingua's ``rate``: fraction of tokens to KEEP.
         # 0.5 = keep half. Lower = more aggressive compression.
         self.ratio = ratio
+        # None = auto-detect on first load. Explicit values ("cuda", "mps",
+        # "cpu") bypass detection — useful for Docker images where we want
+        # deterministic behavior.
+        self.device = device
         # Lazy-loaded on first compress() call. Tests assign a mock here
         # directly to skip the real model load.
         self._prompt_compressor: Any = None
@@ -108,8 +130,10 @@ class Lingua:
             import llmlingua
         except ImportError as e:
             raise ImportError(_LINGUA_INSTALL_HINT) from e
+        device = self.device or _auto_device()
         self._prompt_compressor = llmlingua.PromptCompressor(
             model_name=self.model,
             use_llmlingua2=True,
+            device_map=device,
         )
         return self._prompt_compressor

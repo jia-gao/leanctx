@@ -47,6 +47,19 @@ def test_lingua_default_model_and_ratio() -> None:
     assert lingua.ratio == 0.5
 
 
+def test_lingua_device_defaults_to_auto_detect() -> None:
+    # None signals auto-detect on load. Users who want deterministic
+    # behavior (Docker images, CI) can pin via device="cpu" | "mps" | "cuda".
+    assert Lingua().device is None
+    assert Lingua(device="cpu").device == "cpu"
+
+
+def test_auto_device_returns_valid_device_name() -> None:
+    from leanctx.compressors.lingua import _auto_device
+
+    assert _auto_device() in {"cuda", "mps", "cpu"}
+
+
 # --------------------------------------------------------------------------- #
 # Compression path — exercised through an injected mock
 # --------------------------------------------------------------------------- #
