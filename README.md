@@ -132,12 +132,6 @@ Compressor:  Verbatim | Lingua (LLMLingua-2) | SelfLLM (your LLM)
 real Anthropic / OpenAI / Gemini SDK → API
 ```
 
-## Credits
-
-Architecturally inspired by [OpenCode DCP](https://github.com/Opencode-DCP/opencode-dynamic-context-pruning) (AGPL-3.0, not copied). leanctx is a clean-room MIT implementation.
-
-Ships Microsoft's [LLMLingua-2](https://huggingface.co/microsoft/llmlingua-2-xlm-roberta-large-meetingbank) (MIT) as an optional extra.
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
