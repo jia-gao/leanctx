@@ -93,13 +93,13 @@ async def test_on_mode_async_pipeline_runs() -> None:
 
 
 def test_unknown_compressor_in_routing_is_skipped_gracefully() -> None:
-    # v0.0.x doesn't know "lingua" yet; config should parse without error
-    # and fall back to the default (Verbatim) for that content type.
+    # 'selfllm' is not implemented until W3; config should parse without
+    # error and fall back to the default (Verbatim) for that content type.
     mw = Middleware(
         {
             "mode": "on",
             "trigger": {"threshold_tokens": 0},
-            "routing": {"prose": "lingua"},  # unknown -> default
+            "routing": {"prose": "selfllm"},  # unknown -> default
         }
     )
     messages = [{"role": "user", "content": "some prose to route"}]

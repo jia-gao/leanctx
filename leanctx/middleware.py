@@ -25,7 +25,7 @@ from collections.abc import Callable
 from typing import Any
 
 from leanctx.classifier import RepeatTracker, classify
-from leanctx.compressors import Compressor, ContentType, Verbatim
+from leanctx.compressors import Compressor, ContentType, Lingua, Verbatim
 from leanctx.router import Router
 from leanctx.stats import CompressionStats
 from leanctx.tokens import count_message_tokens
@@ -36,10 +36,11 @@ _log = logging.getLogger(__name__)
 
 _DEFAULT_THRESHOLD_TOKENS = 2000
 
-# Factories for Compressor names that appear in routing config. v0.1 will
-# add "lingua" and "selfllm" here without touching any other file.
+# Factories for Compressor names that appear in routing config. Add new
+# compressor names here as implementations land (e.g. "selfllm" in W3).
 _COMPRESSOR_FACTORIES: dict[str, Callable[[], Compressor]] = {
     "verbatim": Verbatim,
+    "lingua": Lingua,
 }
 
 

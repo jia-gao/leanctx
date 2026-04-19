@@ -88,6 +88,8 @@ module = [
     "openai.*",
     "google",
     "google.*",
+    "llmlingua",
+    "llmlingua.*",
 ]
 ignore_missing_imports = true
 

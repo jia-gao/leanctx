@@ -13,6 +13,7 @@ The :class:`Router` (also v0.1) selects a Compressor per content type.
 """
 
 from leanctx.compressors.base import Compressor, ContentType
+from leanctx.compressors.lingua import Lingua
 from leanctx.compressors.verbatim import Verbatim
 
-__all__ = ["Compressor", "ContentType", "Verbatim"]
+__all__ = ["Compressor", "ContentType", "Lingua", "Verbatim"]
