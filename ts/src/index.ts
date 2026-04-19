@@ -21,4 +21,6 @@ export type { ChatMessage, LeanctxConfig } from "./middleware.js";
 export type { CompressionStats } from "./stats.js";
 export { passthroughStats } from "./stats.js";
 
+export { attachTelemetry } from "./telemetry.js";
+
 export const VERSION = "0.0.0";

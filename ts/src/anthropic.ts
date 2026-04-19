@@ -15,6 +15,7 @@
 import Anthropic_SDK from "@anthropic-ai/sdk";
 import type { LeanctxConfig } from "./middleware.js";
 import { Middleware } from "./middleware.js";
+import { attachTelemetry } from "./telemetry.js";
 
 type AnthropicClientOptions = ConstructorParameters<typeof Anthropic_SDK>[0];
 
@@ -50,18 +51,29 @@ class MessagesWrapper {
 
     async create(params: Parameters<Anthropic_SDK["messages"]["create"]>[0]): Promise<unknown> {
         // The Anthropic SDK's create signature is a discriminated union
-        // (stream vs non-stream); we just forward both paths. v0.1 wires
-        // the middleware to actually compress params.messages.
+        // (stream vs non-stream). For both paths we route messages
+        // through the middleware (passthrough in v0.0.x — real
+        // compression port lands in v0.2) and attach leanctx telemetry
+        // to the response's usage object before returning.
+        let stats = undefined;
         if ("messages" in params && Array.isArray(params.messages)) {
-            const [compressed] = this._middleware.compressMessages(
+            const [compressed, s] = this._middleware.compressMessages(
                 params.messages as Parameters<typeof this._middleware.compressMessages>[0],
             );
             params = { ...params, messages: compressed } as typeof params;
+            stats = s;
         }
-        return this._upstream.messages.create(params);
+        const response = await this._upstream.messages.create(params);
+        if (stats !== undefined) {
+            attachTelemetry(response, stats);
+        }
+        return response;
     }
 
     stream(params: Parameters<Anthropic_SDK["messages"]["stream"]>[0]): unknown {
+        // Streaming responses emit chunks; telemetry aggregation across
+        // the stream is v0.2 work. We still route messages through the
+        // middleware on the request side.
         if ("messages" in params && Array.isArray(params.messages)) {
             const [compressed] = this._middleware.compressMessages(
                 params.messages as Parameters<typeof this._middleware.compressMessages>[0],

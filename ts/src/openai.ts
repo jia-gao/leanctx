@@ -13,6 +13,7 @@
 import OpenAI_SDK from "openai";
 import type { LeanctxConfig } from "./middleware.js";
 import { Middleware } from "./middleware.js";
+import { attachTelemetry } from "./telemetry.js";
 
 type OpenAIClientOptions = ConstructorParameters<typeof OpenAI_SDK>[0];
 
@@ -54,12 +55,21 @@ class CompletionsWrapper {
     async create(
         params: Parameters<OpenAI_SDK["chat"]["completions"]["create"]>[0],
     ): Promise<unknown> {
+        let stats = undefined;
         if ("messages" in params && Array.isArray(params.messages)) {
-            const [compressed] = this._middleware.compressMessages(
+            const [compressed, s] = this._middleware.compressMessages(
                 params.messages as Parameters<typeof this._middleware.compressMessages>[0],
             );
             params = { ...params, messages: compressed } as typeof params;
+            stats = s;
         }
-        return this._upstream.chat.completions.create(params);
+        const response = await this._upstream.chat.completions.create(params);
+        // Only attach when we actually ran the middleware (stream=false
+        // returns a ChatCompletion; stream=true returns an iterator
+        // whose chunks don't carry usage until the final chunk — v0.2).
+        if (stats !== undefined && !(params as { stream?: boolean }).stream) {
+            attachTelemetry(response, stats);
+        }
+        return response;
     }
 }
