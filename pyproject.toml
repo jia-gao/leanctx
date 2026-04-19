@@ -92,6 +92,8 @@ module = [
     "google.*",
     "llmlingua",
     "llmlingua.*",
+    "torch",
+    "torch.*",
 ]
 ignore_missing_imports = true
 
