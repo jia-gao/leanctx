@@ -9,7 +9,7 @@ See https://github.com/jia-gao/leanctx for progress.
 
 from leanctx.classifier import RepeatTracker, classify
 from leanctx.client import Anthropic, AsyncAnthropic, AsyncOpenAI, Gemini, OpenAI
-from leanctx.compressors import Compressor, ContentType, Lingua, Verbatim
+from leanctx.compressors import Compressor, ContentType, Lingua, SelfLLM, Verbatim
 from leanctx.middleware import Middleware
 from leanctx.router import Router
 from leanctx.stats import CompressionStats
@@ -29,6 +29,7 @@ __all__ = [
     "OpenAI",
     "RepeatTracker",
     "Router",
+    "SelfLLM",
     "Verbatim",
     "__version__",
     "classify",

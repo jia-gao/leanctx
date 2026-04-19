@@ -25,7 +25,7 @@ from collections.abc import Callable
 from typing import Any
 
 from leanctx.classifier import RepeatTracker, classify
-from leanctx.compressors import Compressor, ContentType, Lingua, Verbatim
+from leanctx.compressors import Compressor, ContentType, Lingua, SelfLLM, Verbatim
 from leanctx.router import Router
 from leanctx.stats import CompressionStats
 from leanctx.tokens import count_message_tokens
@@ -36,11 +36,24 @@ _log = logging.getLogger(__name__)
 
 _DEFAULT_THRESHOLD_TOKENS = 2000
 
-# Factories for Compressor names that appear in routing config. Add new
-# compressor names here as implementations land (e.g. "selfllm" in W3).
-_COMPRESSOR_FACTORIES: dict[str, Callable[[], Compressor]] = {
-    "verbatim": Verbatim,
-    "lingua": Lingua,
+# Factories for Compressor names that appear in routing config. Each
+# factory accepts a per-compressor config dict (e.g. config["lingua"])
+# and returns an instance. Missing keys fall back to each compressor's
+# own defaults.
+_COMPRESSOR_FACTORIES: dict[str, Callable[[dict[str, Any]], Compressor]] = {
+    "verbatim": lambda _cfg: Verbatim(),
+    "lingua": lambda cfg: Lingua(
+        model=cfg.get("model", "microsoft/llmlingua-2-xlm-roberta-large-meetingbank"),
+        ratio=cfg.get("ratio", 0.5),
+        device=cfg.get("device"),
+    ),
+    "selfllm": lambda cfg: SelfLLM(
+        provider=cfg.get("provider", "anthropic"),
+        model=cfg.get("model", "claude-haiku-4-5"),
+        api_key=cfg.get("api_key"),
+        ratio=cfg.get("ratio", 0.3),
+        max_summary_tokens=cfg.get("max_summary_tokens", 500),
+    ),
 }
 
 
@@ -150,8 +163,9 @@ class Middleware:
                 continue
             factory = _COMPRESSOR_FACTORIES.get(compressor_name)
             if factory is None:
-                # Forward-compatible: v0.0.x only knows 'verbatim'. Config
-                # referencing 'lingua' or 'selfllm' falls back to default.
+                # Forward-compatible: a config referencing a compressor name
+                # we haven't implemented yet (e.g. 'semantic' in the future)
+                # falls back to default Verbatim silently with a log warning.
                 _log.warning(
                     "Compressor %r not available in this leanctx version; "
                     "falling back to default (verbatim) for %s",
@@ -159,7 +173,10 @@ class Middleware:
                     ctype_str,
                 )
                 continue
-            router.register(ctype, factory())
+            # Per-compressor config lives under its own key, e.g.
+            # {"lingua": {...}, "selfllm": {...}}. Missing key -> {}.
+            compressor_cfg = config.get(compressor_name) or {}
+            router.register(ctype, factory(compressor_cfg))
         return router
 
 

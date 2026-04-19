@@ -93,13 +93,14 @@ async def test_on_mode_async_pipeline_runs() -> None:
 
 
 def test_unknown_compressor_in_routing_is_skipped_gracefully() -> None:
-    # 'selfllm' is not implemented until W3; config should parse without
-    # error and fall back to the default (Verbatim) for that content type.
+    # A forward-compatible config may reference compressor names that
+    # don't exist yet (e.g. a future 'semantic' compressor). The router
+    # logs a warning and falls back to the default (Verbatim).
     mw = Middleware(
         {
             "mode": "on",
             "trigger": {"threshold_tokens": 0},
-            "routing": {"prose": "selfllm"},  # unknown -> default
+            "routing": {"prose": "semantic"},  # unknown -> default
         }
     )
     messages = [{"role": "user", "content": "some prose to route"}]
