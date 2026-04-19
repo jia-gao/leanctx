@@ -107,11 +107,19 @@ docker build -t leanctx:lingua --build-arg LINGUA=true .   # + LLMLingua-2, ~3 G
 
 ## Supported providers
 
-| Provider | Drop-in client | Streaming | SelfLLM target |
-|---|:-:|:-:|:-:|
-| Anthropic | ✅ `leanctx.Anthropic` / `AsyncAnthropic` | ✅ | ✅ |
-| OpenAI    | ✅ `leanctx.OpenAI` / `AsyncOpenAI` | ✅ | v0.2 |
-| Gemini    | ✅ `leanctx.Gemini` (`.models` + `.aio.models`) | ✅ | v0.2 |
+| Provider | Drop-in client | Streaming | Compression applied | SelfLLM target |
+|---|:-:|:-:|:-:|:-:|
+| Anthropic | ✅ `leanctx.Anthropic` / `AsyncAnthropic` | ✅ | ✅ | ✅ |
+| OpenAI    | ✅ `leanctx.OpenAI` / `AsyncOpenAI` | ✅ | ✅ | v0.2 |
+| Gemini    | ✅ `leanctx.Gemini` (`.models` + `.aio.models`) | ✅ | ⚠️ passthrough in v0.1 — see below | v0.2 |
+
+**Gemini note (v0.1):** The wrapper is drop-in — any existing
+`google.genai.Client` code works unchanged — but Gemini's `contents`
+shape (string | list[str] | list[Content]) isn't yet normalized into
+leanctx's internal message format, so the middleware is skipped for
+Gemini requests. Compression telemetry is attached as a zero-valued
+placeholder. Full Gemini normalization lands in v0.2. If you need
+compression today, route through Anthropic or OpenAI.
 
 ## Architecture
 

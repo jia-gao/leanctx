@@ -290,8 +290,17 @@ class Gemini:
     """Drop-in replacement for ``google.genai.Client``.
 
     Exposes sync methods at ``client.models`` and async methods at
-    ``client.aio.models``, matching the upstream SDK exactly. Only
-    ``generate_content`` is intercepted for telemetry in v0.0.x.
+    ``client.aio.models``, matching the upstream SDK exactly.
+
+    **v0.1 limitation:** Gemini's ``contents`` parameter can be a
+    string, a list of strings, or a list of ``Content`` objects — none
+    of which map directly to the leanctx middleware's OpenAI-style
+    ``list[dict]`` message shape. Rather than ship a half-working
+    normalization, v0.1 intercepts ``generate_content`` to attach
+    zero-valued :class:`CompressionStats` telemetry and forwards the
+    request unmodified. Users who need actual compression should route
+    through :class:`Anthropic` or :class:`OpenAI` for now. Full
+    normalization lands in v0.2.
     """
 
     def __init__(
@@ -319,13 +328,15 @@ class _GeminiModels:
         self._middleware = middleware
 
     def generate_content(self, *args: Any, **kwargs: Any) -> Any:
+        # v0.1: middleware is skipped for Gemini pending contents-shape
+        # normalization. See Gemini class docstring for details.
         response = self._upstream.models.generate_content(*args, **kwargs)
         _attach_telemetry(response, CompressionStats(), field="usage_metadata")
         return response
 
     def generate_content_stream(self, *args: Any, **kwargs: Any) -> Any:
         # Streaming returns an iterator of chunks; telemetry aggregation
-        # across the stream lands in v0.1. For now, pass through untouched.
+        # across the stream is v0.2 work. Pass through untouched.
         return self._upstream.models.generate_content_stream(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
