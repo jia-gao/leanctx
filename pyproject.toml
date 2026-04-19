@@ -94,6 +94,8 @@ module = [
     "llmlingua.*",
     "torch",
     "torch.*",
+    "langchain_core",
+    "langchain_core.*",
 ]
 ignore_missing_imports = true
 
