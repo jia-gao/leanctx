@@ -1,0 +1,42 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv
+build
+dist
+*.egg-info
+*.egg
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# TS SDK
+ts/node_modules
+ts/dist
+ts/package-lock.json
+
+# IDE / OS
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Local scripts / one-off experiments
+scripts
+
+# Tests aren't needed inside the runtime image
+tests
+
+# Secrets / env
+.env
+.env.local
+.pypirc
