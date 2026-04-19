@@ -24,10 +24,11 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from leanctx.classifier import RepeatTracker, classify
+from leanctx.classifier import classify
 from leanctx.compressors import Compressor, ContentType, Lingua, SelfLLM, Verbatim
 from leanctx.router import Router
 from leanctx.stats import CompressionStats
+from leanctx.strategies import DedupStrategy, PurgeErrorsStrategy, Strategy
 from leanctx.tokens import count_message_tokens
 
 __all__ = ["CompressionStats", "Middleware"]
@@ -71,10 +72,12 @@ class Middleware:
 
         self._router = self._build_router(config)
 
-        # One tracker per Middleware instance ≈ one tracker per client. v0.1
-        # may move this to a session-scoped store so repeat dedup works
-        # across multiple requests in the same logical session.
-        self._repeat: RepeatTracker | None = RepeatTracker() if self._active else None
+        # Strategies are deterministic pre-compression filters. Each
+        # strategy is persistent per Middleware instance so state (like
+        # DedupStrategy's seen-content hash set) survives across requests.
+        self._strategies: list[Strategy] = (
+            self._build_strategies(config) if self._active else []
+        )
 
     # ----------------------------------------------------------------- #
     # Public sync / async entry points
@@ -85,6 +88,11 @@ class Middleware:
     ) -> tuple[list[dict[str, Any]], CompressionStats]:
         if not self._active or not messages:
             return messages, CompressionStats()
+
+        # Apply deterministic strategies first — dedup, purge-errors, etc.
+        # They can shrink the span before we spend time tokenizing.
+        for strategy in self._strategies:
+            messages = strategy.apply(messages)
 
         input_tokens = count_message_tokens(messages)
         if input_tokens < self._threshold:
@@ -101,10 +109,6 @@ class Middleware:
         methods: set[str] = set()
 
         for msg in messages:
-            if self._repeat is not None and self._repeat.is_repeat(msg):
-                # Drop the repeat entirely. Token savings come from the
-                # simple fact that the duplicate never reaches the LLM.
-                continue
             ctype = classify(msg)
             compressor = self._router.route(ctype)
             compressed, stats = compressor.compress([msg])
@@ -121,6 +125,9 @@ class Middleware:
         if not self._active or not messages:
             return messages, CompressionStats()
 
+        for strategy in self._strategies:
+            messages = strategy.apply(messages)
+
         input_tokens = count_message_tokens(messages)
         if input_tokens < self._threshold:
             return messages, CompressionStats(
@@ -136,8 +143,6 @@ class Middleware:
         methods: set[str] = set()
 
         for msg in messages:
-            if self._repeat is not None and self._repeat.is_repeat(msg):
-                continue
             ctype = classify(msg)
             compressor = self._router.route(ctype)
             compressed, stats = await compressor.compress_async([msg])
@@ -178,6 +183,34 @@ class Middleware:
             compressor_cfg = config.get(compressor_name) or {}
             router.register(ctype, factory(compressor_cfg))
         return router
+
+    def _build_strategies(self, config: dict[str, Any]) -> list[Strategy]:
+        """Materialize the Strategy pipeline from config.
+
+        Config shape::
+
+            "strategies": {
+                "dedup": true,
+                "purge_errors": {"after_turns": 4}
+            }
+
+        Both strategies are enabled by default in active mode. Set to
+        ``false`` to disable.
+        """
+        strat_cfg = config.get("strategies") or {}
+        out: list[Strategy] = []
+
+        if strat_cfg.get("dedup", True):
+            out.append(DedupStrategy())
+
+        purge_cfg = strat_cfg.get("purge_errors", True)
+        if purge_cfg:
+            after_turns = 4
+            if isinstance(purge_cfg, dict):
+                after_turns = int(purge_cfg.get("after_turns", 4))
+            out.append(PurgeErrorsStrategy(after_turns=after_turns))
+
+        return out
 
 
 def _aggregate(total_in: int, total_out: int, methods: set[str]) -> CompressionStats:

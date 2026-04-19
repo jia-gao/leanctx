@@ -13,6 +13,7 @@ from leanctx.compressors import Compressor, ContentType, Lingua, SelfLLM, Verbat
 from leanctx.middleware import Middleware
 from leanctx.router import Router
 from leanctx.stats import CompressionStats
+from leanctx.strategies import DedupStrategy, PurgeErrorsStrategy, Strategy
 
 __version__ = "0.0.0"
 
@@ -23,13 +24,16 @@ __all__ = [
     "CompressionStats",
     "Compressor",
     "ContentType",
+    "DedupStrategy",
     "Gemini",
     "Lingua",
     "Middleware",
     "OpenAI",
+    "PurgeErrorsStrategy",
     "RepeatTracker",
     "Router",
     "SelfLLM",
+    "Strategy",
     "Verbatim",
     "__version__",
     "classify",
