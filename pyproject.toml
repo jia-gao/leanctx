@@ -58,6 +58,8 @@ dev = [
     "build>=1.0",
     "twine>=5.0",
     "tiktoken>=0.7",
+    "anthropic>=0.40.0",
+    "respx>=0.21.0",
 ]
 
 [project.urls]
