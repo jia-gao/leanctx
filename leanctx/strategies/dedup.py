@@ -1,12 +1,21 @@
-"""DedupStrategy — drop duplicate messages within a session.
+"""DedupStrategy — drop duplicate messages *within a single request*.
 
-Repeated tool calls with identical arguments produce identical outputs.
-Dedup detects this via a hash of each message's text content and drops
-all but the first occurrence within the Strategy's lifetime.
+Agent conversation histories often accumulate identical tool outputs —
+the same ``grep`` query, the same status check, the same retrieved doc
+surfaced by two different retrieval paths. DedupStrategy walks each
+request's message list and keeps only the first occurrence of any
+given text content.
 
-The tracker is persistent per-instance: the Middleware constructs a
-single DedupStrategy and reuses it across every ``compress_messages``
-call, so dedup works across requests within a single Middleware.
+**Scope is per-call, not per-client.** Earlier iterations held a
+persistent tracker on the Strategy instance, which caused identical
+user prompts across independent requests to be silently dropped — a
+correctness bug. Each call to :meth:`apply` now uses a fresh tracker,
+so this strategy is always safe to enable as a default.
+
+Users who want across-request deduplication (e.g. to drop recomputed
+embeddings that are genuinely redundant across a whole session) should
+implement that at their session layer where the session boundary is
+explicit.
 """
 
 from __future__ import annotations
@@ -17,16 +26,14 @@ from leanctx.classifier import RepeatTracker
 
 
 class DedupStrategy:
-    """Drop messages whose text content was seen before."""
+    """Drop messages whose text content already appeared earlier in the same list."""
 
     name = "dedup"
 
-    def __init__(self) -> None:
-        self._tracker = RepeatTracker()
-
     def apply(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [m for m in messages if not self._tracker.is_repeat(m)]
+        tracker = RepeatTracker()
+        return [m for m in messages if not tracker.is_repeat(m)]
 
     def reset(self) -> None:
-        """Clear seen-content state (e.g. on session boundary)."""
-        self._tracker.reset()
+        """No-op. State is per-call; preserved for backward compat."""
+        return None

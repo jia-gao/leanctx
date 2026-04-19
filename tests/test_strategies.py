@@ -31,22 +31,26 @@ def test_dedup_drops_duplicate_content() -> None:
     assert len(out) == 1
 
 
-def test_dedup_is_persistent_across_calls() -> None:
+def test_dedup_does_not_carry_state_across_calls() -> None:
+    # Correctness contract: dedup only applies within a single request.
+    # Identical content in a later request must survive — it's a fresh
+    # user query, not a stale duplicate.
     s = DedupStrategy()
-    msg = {"role": "user", "content": "persistent"}
+    msg = {"role": "user", "content": "repeated user query"}
     first_call = s.apply([msg])
     second_call = s.apply([msg])
     assert first_call == [msg]
-    assert second_call == []
+    assert second_call == [msg], "dedup must not leak state across apply() calls"
 
 
-def test_dedup_reset_clears_state() -> None:
+def test_dedup_reset_is_a_noop() -> None:
+    # State is already per-call; reset() is preserved for backward compat
+    # but does nothing. Calling it must not affect behavior.
     s = DedupStrategy()
-    msg = {"role": "user", "content": "reset-me"}
+    msg = {"role": "user", "content": "x"}
     s.apply([msg])
     s.reset()
-    out = s.apply([msg])
-    assert out == [msg]
+    assert s.apply([msg, msg]) == [msg]
 
 
 # --------------------------------------------------------------------------- #
