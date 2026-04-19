@@ -1,0 +1,63 @@
+{
+    "name": "leanctx",
+    "version": "0.0.0",
+    "description": "Drop-in prompt compression for production LLM applications. TypeScript SDK — skeleton for v0.1.",
+    "keywords": [
+        "llm",
+        "prompt-compression",
+        "anthropic",
+        "openai",
+        "gemini",
+        "rag",
+        "langchain"
+    ],
+    "author": "Jay Gao",
+    "license": "MIT",
+    "homepage": "https://github.com/jia-gao/leanctx",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/jia-gao/leanctx.git",
+        "directory": "ts"
+    },
+    "bugs": {
+        "url": "https://github.com/jia-gao/leanctx/issues"
+    },
+    "type": "module",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "scripts": {
+        "build": "tsc",
+        "typecheck": "tsc --noEmit",
+        "clean": "rm -rf dist"
+    },
+    "peerDependencies": {
+        "@anthropic-ai/sdk": "^0.40.0",
+        "openai": "^5.0.0"
+    },
+    "peerDependenciesMeta": {
+        "@anthropic-ai/sdk": {
+            "optional": true
+        },
+        "openai": {
+            "optional": true
+        }
+    },
+    "devDependencies": {
+        "@anthropic-ai/sdk": "^0.40.0",
+        "openai": "^5.0.0",
+        "typescript": "^5.5.0"
+    },
+    "engines": {
+        "node": ">=18"
+    }
+}

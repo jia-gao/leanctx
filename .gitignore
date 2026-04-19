@@ -43,8 +43,10 @@ htmlcov/
 .cache/
 models/
 
-# Node (for future TS SDK)
+# Node / TS SDK
 node_modules/
+ts/dist/
+ts/package-lock.json
 
 # Env files
 .env
