@@ -1,14 +1,14 @@
 # leanctx
 
 **Drop-in prompt compression for production LLM applications.**
-Cut Anthropic / OpenAI / Gemini bills by 40–60% without changing your code.
+Cut your LLM token bill by 40–60% without changing your code.
 
 ```python
 # before
-from anthropic import Anthropic
+from openai import OpenAI
 
 # after
-from leanctx import Anthropic  # same interface, compressed requests
+from leanctx import OpenAI  # same interface, compressed requests
 ```
 
 Open-source models. No API keys to anyone but your existing provider.
@@ -30,7 +30,7 @@ You're building a production LLM app and your token bill is a line item:
 - Document-processing pipelines
 - Anything where input tokens accumulate and you pay for every one
 
-If your code calls `anthropic.messages.create()` or `openai.chat.completions.create()` in production, this is for you.
+If your code calls a hosted LLM API in production and input tokens are a meaningful line item, this is for you.
 
 ## How it works
 
@@ -43,9 +43,9 @@ Three compression modes, one config switch:
 Content-aware routing means code blocks, diffs, stack traces, and tool schemas are preserved verbatim — no corrupted syntax.
 
 ```python
-from leanctx import Anthropic
+from leanctx import OpenAI
 
-client = Anthropic(leanctx_config={
+client = OpenAI(leanctx_config={
     "mode": "on",
     "trigger": {"threshold_tokens": 2000},
     "routing": {
@@ -55,11 +55,11 @@ client = Anthropic(leanctx_config={
         "long_important": "selfllm",    # cheap LLM summarization
     },
     "lingua":  {"ratio": 0.5, "device": "cpu"},
-    "selfllm": {"model": "claude-haiku-4-5", "api_key": "sk-...", "ratio": 0.3},
+    "selfllm": {"model": "gpt-4o-mini", "api_key": "sk-...", "ratio": 0.3},
 })
 
-response = client.messages.create(
-    model="claude-sonnet-4-6",
+response = client.chat.completions.create(
+    model="gpt-4o",
     max_tokens=1024,
     messages=[{"role": "user", "content": long_document}],
 )
@@ -73,7 +73,7 @@ print(response.usage.leanctx_ratio)
 
 Measured end-to-end with the real LLMLingua-2 model (`scripts/integration_test_e2e.py`):
 
-- 4,450 chars in → 2,462 chars sent on the wire to `api.anthropic.com` (**44.7% reduction**)
+- 4,450 chars in → 2,462 chars sent on the wire to `api.openai.com` (**44.7% reduction**)
 - 395 tokens saved per request at `mode="on", ratio=0.5`
 - `response.usage.leanctx_method == "lingua"` verifies the pipeline executed
 
