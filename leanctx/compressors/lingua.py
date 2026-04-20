@@ -12,6 +12,23 @@ dependency, loaded lazily on first use. Users install them via::
 
 Tests inject a fake PromptCompressor through ``_prompt_compressor`` so
 CI can exercise the code path without torch / transformers / the model.
+
+**Block-aware compression (v0.2):** Earlier versions flattened every
+message into a single compressed text blob, which destroyed structured
+blocks like ``tool_use`` and ``tool_result`` — breaking tool-call
+linkage and dropping anything the classifier hadn't already filtered.
+
+v0.2 preserves block structure:
+* ``text`` blocks: compressed in place
+* ``tool_result`` blocks: inner content recursively compressed
+  (string → compressed string; list of blocks → each handled)
+* ``tool_use`` blocks: preserved verbatim (the tool's input must not
+  be rewritten — that would change the actual tool invocation)
+* ``image``, ``thinking``, ``document``, unknown: preserved verbatim
+
+Token counting in :class:`CompressionStats` sums over all blocks so
+the reported ratio reflects the whole message, not just the portions
+that were compressed.
 """
 
 from __future__ import annotations
@@ -49,13 +66,7 @@ def _auto_device() -> str:
 
 
 class Lingua:
-    """Extractive compressor backed by LLMLingua-2.
-
-    Single-message compression: the Middleware calls ``compress`` with a
-    one-message list, so we join + compress + repack into one message
-    with the original role. Multi-message aggregation is the Middleware's
-    job (via its message-by-message loop).
-    """
+    """Block-aware extractive compressor backed by LLMLingua-2."""
 
     name = "lingua"
 
@@ -87,28 +98,24 @@ class Lingua:
         if not messages:
             return messages, CompressionStats(method="lingua")
 
-        text = "\n\n".join(get_text_content(m) for m in messages)
-        if not text.strip():
-            # Nothing to compress — avoid a model load for empty input.
+        # Short-circuit: skip the model load when there's nothing to
+        # compress anywhere in the span.
+        if not any(get_text_content(m).strip() for m in messages):
             return messages, CompressionStats(method="lingua")
 
-        compressor = self._load()
-        result = compressor.compress_prompt(text, rate=self.ratio)
+        new_messages: list[dict[str, Any]] = []
+        total_in = 0
+        total_out = 0
+        for msg in messages:
+            new_msg, in_tok, out_tok = self._compress_message(msg)
+            new_messages.append(new_msg)
+            total_in += in_tok
+            total_out += out_tok
 
-        compressed_text = str(result["compressed_prompt"])
-        role = messages[0].get("role", "user")
-        out: list[dict[str, Any]] = [{"role": role, "content": compressed_text}]
-
-        # LLMLingua reports its own token counts; fall back to our tiktoken-
-        # based counter when fields are missing.
-        input_tokens = int(result.get("origin_tokens") or count_tokens(text))
-        output_tokens = int(
-            result.get("compressed_tokens") or count_tokens(compressed_text)
-        )
-        return out, CompressionStats(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            ratio=(output_tokens / input_tokens) if input_tokens else 1.0,
+        return new_messages, CompressionStats(
+            input_tokens=total_in,
+            output_tokens=total_out,
+            ratio=(total_out / total_in) if total_in else 1.0,
             method="lingua",
         )
 
@@ -118,6 +125,99 @@ class Lingua:
         # LLMLingua is synchronous under the hood. Offload so we don't
         # block the event loop.
         return await asyncio.to_thread(self.compress, messages)
+
+    # ----------------------------------------------------------------- #
+    # Per-message / per-block compression
+    # ----------------------------------------------------------------- #
+
+    def _compress_message(
+        self, msg: dict[str, Any]
+    ) -> tuple[dict[str, Any], int, int]:
+        """Compress the compressible text in a single message while
+        preserving its structure. Returns ``(new_msg, in_tok, out_tok)``.
+        """
+        content = msg.get("content")
+
+        # OpenAI-style plain string content — compress the whole thing.
+        if isinstance(content, str):
+            if not content.strip():
+                return msg, 0, 0
+            compressed, in_tok, out_tok = self._compress_text(content)
+            return {**msg, "content": compressed}, in_tok, out_tok
+
+        # Anthropic-style list of blocks — walk blocks, compress text
+        # portions in place, preserve structured blocks verbatim.
+        if isinstance(content, list):
+            new_blocks: list[Any] = []
+            total_in = 0
+            total_out = 0
+            for block in content:
+                new_block, in_tok, out_tok = self._compress_block(block)
+                new_blocks.append(new_block)
+                total_in += in_tok
+                total_out += out_tok
+            return {**msg, "content": new_blocks}, total_in, total_out
+
+        # Unknown shape (None, dict, etc.) — pass through.
+        return msg, 0, 0
+
+    def _compress_block(self, block: Any) -> tuple[Any, int, int]:
+        """Compress text inside a structured block while preserving its
+        type and any non-text fields. Returns ``(new_block, in_tok, out_tok)``.
+
+        Passthrough block types (``tool_use``, ``image``, ``thinking``,
+        ``document``, and unknown types) still contribute their token
+        count to both input and output so the message-level ratio
+        reflects the whole message, not just the compressed portion.
+        """
+        if not isinstance(block, dict):
+            # Non-dict garbage — pass through, nothing to count.
+            return block, 0, 0
+
+        btype = block.get("type", "")
+
+        if btype == "text":
+            text = block.get("text", "")
+            if isinstance(text, str) and text.strip():
+                compressed, in_tok, out_tok = self._compress_text(text)
+                return {**block, "text": compressed}, in_tok, out_tok
+            # Empty or non-string text field — pass through.
+            return block, 0, 0
+
+        if btype == "tool_result":
+            inner = block.get("content")
+            if isinstance(inner, str):
+                if inner.strip():
+                    compressed, in_tok, out_tok = self._compress_text(inner)
+                    return {**block, "content": compressed}, in_tok, out_tok
+                return block, 0, 0
+            if isinstance(inner, list):
+                new_inner: list[Any] = []
+                total_in = 0
+                total_out = 0
+                for inner_block in inner:
+                    nb, in_tok, out_tok = self._compress_block(inner_block)
+                    new_inner.append(nb)
+                    total_in += in_tok
+                    total_out += out_tok
+                return {**block, "content": new_inner}, total_in, total_out
+            return block, 0, 0
+
+        # Pass-through block types. Count tokens so the reported ratio
+        # stays honest — a message that's mostly pass-through gets a
+        # ratio close to 1.0 rather than looking wildly compressed.
+        text = get_text_content({"content": [block]})
+        tokens = count_tokens(text) if text else 0
+        return block, tokens, tokens
+
+    def _compress_text(self, text: str) -> tuple[str, int, int]:
+        """Run LLMLingua on a raw text string."""
+        compressor = self._load()
+        result = compressor.compress_prompt(text, rate=self.ratio)
+        compressed = str(result["compressed_prompt"])
+        in_tok = int(result.get("origin_tokens") or count_tokens(text))
+        out_tok = int(result.get("compressed_tokens") or count_tokens(compressed))
+        return compressed, in_tok, out_tok
 
     # ----------------------------------------------------------------- #
     # Lazy loader

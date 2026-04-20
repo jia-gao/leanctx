@@ -83,7 +83,7 @@ def test_lingua_compresses_text_via_mock() -> None:
     assert stats.ratio == pytest.approx(0.1)
 
 
-def test_lingua_preserves_role_from_first_message() -> None:
+def test_lingua_preserves_role() -> None:
     lingua = Lingua()
     lingua._prompt_compressor = _fake_prompt_compressor(_mock_result())
     messages = [{"role": "assistant", "content": "big response " * 100}]
@@ -169,3 +169,162 @@ def test_lingua_raises_import_error_when_llmlingua_missing() -> None:
     # Trigger _load via a non-empty message.
     with pytest.raises(ImportError, match="'llmlingua' package"):
         lingua.compress([{"role": "user", "content": "trigger model load"}])
+
+
+# --------------------------------------------------------------------------- #
+# Block-aware compression (v0.2)
+# --------------------------------------------------------------------------- #
+
+
+def test_lingua_compresses_text_block_in_list_content() -> None:
+    lingua = Lingua()
+    lingua._prompt_compressor = _fake_prompt_compressor(
+        _mock_result(compressed="short", origin=50, compressed_tokens=5)
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "long prose content " * 30}],
+        }
+    ]
+    out, stats = lingua.compress(messages)
+
+    # Block structure preserved — still a list, still a text block.
+    assert isinstance(out[0]["content"], list)
+    assert out[0]["content"][0]["type"] == "text"
+    assert out[0]["content"][0]["text"] == "short"
+    assert stats.method == "lingua"
+    assert stats.input_tokens == 50
+    assert stats.output_tokens == 5
+
+
+def test_lingua_preserves_tool_use_blocks_verbatim() -> None:
+    lingua = Lingua()
+    # Mock should NOT be called for tool_use content.
+    fake = _fake_prompt_compressor(_mock_result())
+    lingua._prompt_compressor = fake
+
+    tool_use_block = {
+        "type": "tool_use",
+        "id": "toolu_1",
+        "name": "read_file",
+        "input": {"path": "/etc/hosts"},
+    }
+    messages = [{"role": "assistant", "content": [tool_use_block]}]
+    out, _ = lingua.compress(messages)
+
+    # Block preserved exactly — tool invocation semantics must not change.
+    assert out[0]["content"][0] == tool_use_block
+    fake.compress_prompt.assert_not_called()
+
+
+def test_lingua_compresses_tool_result_string_content() -> None:
+    lingua = Lingua()
+    lingua._prompt_compressor = _fake_prompt_compressor(
+        _mock_result(compressed="summarized output", origin=200, compressed_tokens=10)
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": "very verbose tool output " * 50,
+                }
+            ],
+        }
+    ]
+    out, stats = lingua.compress(messages)
+
+    result_block = out[0]["content"][0]
+    assert result_block["type"] == "tool_result"
+    assert result_block["tool_use_id"] == "toolu_1"  # linkage preserved
+    assert result_block["content"] == "summarized output"
+    assert stats.ratio == pytest.approx(10 / 200)
+
+
+def test_lingua_compresses_tool_result_nested_text_blocks() -> None:
+    lingua = Lingua()
+    # Same mock result returned for each call; we're checking the block
+    # structure survives regardless of what LLMLingua spits out.
+    lingua._prompt_compressor = _fake_prompt_compressor(
+        _mock_result(compressed="compact", origin=30, compressed_tokens=3)
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": [
+                        {"type": "text", "text": "part one of the output " * 20},
+                        {"type": "text", "text": "part two of the output " * 20},
+                    ],
+                }
+            ],
+        }
+    ]
+    out, _ = lingua.compress(messages)
+
+    inner = out[0]["content"][0]["content"]
+    assert isinstance(inner, list)
+    assert len(inner) == 2
+    for inner_block in inner:
+        assert inner_block["type"] == "text"
+        assert inner_block["text"] == "compact"
+
+
+def test_lingua_mixed_content_compresses_text_preserves_tool_use() -> None:
+    lingua = Lingua()
+    lingua._prompt_compressor = _fake_prompt_compressor(
+        _mock_result(compressed="compact prose", origin=40, compressed_tokens=4)
+    )
+    tool_use = {
+        "type": "tool_use",
+        "id": "toolu_1",
+        "name": "search",
+        "input": {"q": "kubernetes"},
+    }
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "long reasoning prose " * 20},
+                tool_use,
+            ],
+        }
+    ]
+    out, _ = lingua.compress(messages)
+
+    blocks = out[0]["content"]
+    assert blocks[0] == {"type": "text", "text": "compact prose"}
+    assert blocks[1] == tool_use  # unchanged
+
+
+def test_lingua_image_block_passthrough() -> None:
+    lingua = Lingua()
+    fake = _fake_prompt_compressor(_mock_result())
+    lingua._prompt_compressor = fake
+
+    image_block = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "AAA"},
+    }
+    messages = [{"role": "user", "content": [image_block]}]
+    out, _ = lingua.compress(messages)
+
+    # Image preserved verbatim; model not consulted.
+    assert out[0]["content"][0] == image_block
+    fake.compress_prompt.assert_not_called()
+
+
+def test_lingua_all_empty_input_skips_model_load() -> None:
+    lingua = Lingua()
+    # _prompt_compressor stays None — we verify the model was never loaded.
+    messages = [{"role": "user", "content": [{"type": "image", "source": {"data": "x"}}]}]
+    out, stats = lingua.compress(messages)
+    assert out == messages
+    assert stats.method == "lingua"
+    assert lingua._prompt_compressor is None
