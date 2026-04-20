@@ -1,4 +1,4 @@
-"""LangChain integration — message format conversion.
+"""LangChain integration — message-format conversion + runnable helper.
 
 LangChain uses ``BaseMessage`` subclasses (``HumanMessage``,
 ``AIMessage``, ``SystemMessage``, ``ToolMessage``) for chat messages;
@@ -7,11 +7,10 @@ helpers bridge the two.
 
 The :func:`to_dicts` direction is duck-typed — it reads ``.type`` and
 ``.content`` attributes without importing LangChain, so it works without
-``langchain_core`` installed. :func:`from_dicts` requires
-``langchain_core`` because it constructs concrete ``BaseMessage``
-instances.
+``langchain_core`` installed. :func:`from_dicts` and
+:func:`compress_runnable` both require ``langchain_core``.
 
-Usage::
+**Manual usage (any LangChain version)::**
 
     from langchain_core.messages import HumanMessage
     from leanctx import Middleware
@@ -23,10 +22,21 @@ Usage::
     compressed_dicts, stats = mw.compress_messages(to_dicts(messages))
     compressed_lc = from_dicts(compressed_dicts)
 
-    # Use compressed_lc with any LangChain chat model.
+**Runnable usage (LCEL pipelines, v0.2):**
 
-v0.2 will ship ``LeanctxChatAnthropic`` — a ``ChatAnthropic`` subclass
-that does this conversion + compression automatically.
+    from langchain_anthropic import ChatAnthropic
+    from leanctx.integrations.langchain import compress_runnable
+
+    chain = compress_runnable({
+        "mode": "on",
+        "routing": {"prose": "lingua"},
+    }) | ChatAnthropic(model="claude-sonnet-4-6")
+
+    response = chain.invoke([HumanMessage("... long RAG context ...")])
+
+The runnable is a drop-in for any LangChain chat model (ChatAnthropic,
+ChatOpenAI, ChatGoogleGenerativeAI, etc.) since it operates on the
+provider-neutral ``BaseMessage`` layer.
 """
 
 from __future__ import annotations
@@ -132,3 +142,48 @@ def from_dicts(dicts: list[dict[str, Any]]) -> list[Any]:
         else:
             out.append(cls(content=content))
     return out
+
+
+_RUNNABLE_INSTALL_HINT = (
+    "langchain_core is required for compress_runnable(). "
+    "Install with: pip install langchain_core"
+)
+
+
+def compress_runnable(
+    config: dict[str, Any] | None = None,
+) -> Any:
+    """Return a LangChain ``Runnable`` that compresses a message list.
+
+    The returned runnable takes ``list[BaseMessage]`` and returns
+    ``list[BaseMessage]`` with the middleware applied. Compose it with
+    any LangChain chat model via ``|``::
+
+        chain = compress_runnable({"mode": "on"}) | ChatAnthropic(...)
+        response = chain.invoke([HumanMessage("...")])
+
+    One ``Middleware`` is constructed per call to ``compress_runnable``
+    and reused across invocations of the resulting runnable, so
+    per-Middleware state (Strategies like ``DedupStrategy``) persists
+    across chain invocations. Instantiate a fresh runnable per logical
+    session if you need scoped dedup.
+
+    Requires ``langchain_core``.
+    """
+    try:
+        from langchain_core.runnables import RunnableLambda
+    except ImportError as e:
+        raise ImportError(_RUNNABLE_INSTALL_HINT) from e
+
+    # Local import to avoid a top-level cycle — client.py imports from
+    # leanctx.integrations.langchain wouldn't happen, but middleware.py
+    # could if we ever restructure.
+    from leanctx.middleware import Middleware
+
+    mw = Middleware(config or {})
+
+    def _compress(messages: list[Any]) -> list[Any]:
+        compressed_dicts, _ = mw.compress_messages(to_dicts(messages))
+        return from_dicts(compressed_dicts)
+
+    return RunnableLambda(_compress)

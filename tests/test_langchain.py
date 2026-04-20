@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from leanctx.integrations.langchain import from_dicts, to_dicts
+from leanctx.integrations.langchain import compress_runnable, from_dicts, to_dicts
 
 LANGCHAIN_AVAILABLE = importlib.util.find_spec("langchain_core") is not None
 
@@ -156,3 +156,72 @@ def test_from_dicts_round_trips_tool_call_id_on_tool_message() -> None:
     )
     assert isinstance(lc_messages[0], ToolMessage)
     assert lc_messages[0].tool_call_id == "call_42"
+
+
+# --------------------------------------------------------------------------- #
+# compress_runnable — LCEL pipeline integration
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.skipif(LANGCHAIN_AVAILABLE, reason="langchain_core is installed")
+def test_compress_runnable_raises_without_langchain() -> None:
+    with pytest.raises(ImportError, match="langchain_core"):
+        compress_runnable({"mode": "off"})
+
+
+@pytest.mark.skipif(not LANGCHAIN_AVAILABLE, reason="langchain_core required")
+def test_compress_runnable_returns_a_runnable() -> None:
+    from langchain_core.runnables import Runnable
+
+    runnable = compress_runnable({"mode": "off"})
+    assert isinstance(runnable, Runnable)
+
+
+@pytest.mark.skipif(not LANGCHAIN_AVAILABLE, reason="langchain_core required")
+def test_compress_runnable_passthrough_preserves_messages() -> None:
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    runnable = compress_runnable({"mode": "off"})
+    messages = [HumanMessage(content="q"), AIMessage(content="a")]
+    out = runnable.invoke(messages)
+
+    assert len(out) == 2
+    assert isinstance(out[0], HumanMessage)
+    assert isinstance(out[1], AIMessage)
+    assert out[0].content == "q"
+    assert out[1].content == "a"
+
+
+@pytest.mark.skipif(not LANGCHAIN_AVAILABLE, reason="langchain_core required")
+def test_compress_runnable_active_mode_runs_pipeline() -> None:
+    # mode=on + only-Verbatim routing still preserves content shape but
+    # exercises the real middleware pipeline. Threshold=0 forces the
+    # pipeline to run regardless of input size.
+    from langchain_core.messages import HumanMessage
+
+    runnable = compress_runnable({"mode": "on", "trigger": {"threshold_tokens": 0}})
+    messages = [HumanMessage(content="short prose")]
+    out = runnable.invoke(messages)
+
+    assert len(out) == 1
+    assert isinstance(out[0], HumanMessage)
+    # Default routing -> Verbatim -> content unchanged.
+    assert out[0].content == "short prose"
+
+
+@pytest.mark.skipif(not LANGCHAIN_AVAILABLE, reason="langchain_core required")
+def test_compress_runnable_composes_with_downstream_chain() -> None:
+    # The canonical LCEL use case: runnable | model.
+    from langchain_core.messages import HumanMessage
+    from langchain_core.runnables import RunnableLambda
+
+    compress = compress_runnable({"mode": "off"})
+    # Fake "model" that returns a fixed string from the messages input.
+    model = RunnableLambda(
+        lambda msgs: "model_response:" + msgs[0].content  # type: ignore[index]
+    )
+
+    chain = compress | model
+    result = chain.invoke([HumanMessage(content="hello")])
+
+    assert result == "model_response:hello"
