@@ -80,10 +80,10 @@ Measured end-to-end with the real LLMLingua-2 model (`scripts/integration_test_e
 ## Roadmap
 
 - [x] v0.1 — Python SDK, drop-in Anthropic/OpenAI/Gemini wrappers, `local` (LLMLingua-2) + `self_llm` (Anthropic), content classifier, router, dedup + purge-errors strategies, LangChain format helpers, Docker image
-- [ ] v0.1.0 release — bump version, publish to PyPI + npm (placeholders at 0.0.0 today)
-- [ ] v0.2 — `self_llm` for OpenAI / Gemini providers, full LangChain drop-in ChatAnthropic subclass, LlamaIndex integration, TypeScript SDK compression port (currently skeleton only)
-- [ ] v0.3 — OTel observability, benchmark harness, ghcr.io Docker publish workflow, OpenAI responses-API intercept
-- [ ] v0.4 — Helm chart, Kubernetes sidecar proxy deployment, stateful session dedup
+- [x] v0.2 — `self_llm` on OpenAI + Gemini, block-aware compression (tool_use / tool_result preserved through Lingua), Gemini `contents` normalization (middleware actually runs), LangChain LCEL `compress_runnable`
+- [ ] v0.2.0 release — bump version, publish to PyPI + npm (placeholders at 0.0.0 today)
+- [ ] v0.3 — OTel observability, benchmark harness, ghcr.io Docker publish workflow, OpenAI responses-API intercept, multimodal + function-call compression for Gemini, LlamaIndex helpers, TypeScript SDK compression port
+- [ ] v0.4 — Helm chart, Kubernetes sidecar proxy deployment, stateful session dedup with explicit session IDs
 
 ## Install
 
