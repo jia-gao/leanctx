@@ -13,6 +13,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from leanctx._gemini_adapter import (
+    contents_to_messages as _gemini_contents_to_messages,
+)
+from leanctx._gemini_adapter import (
+    messages_to_contents as _gemini_messages_to_contents,
+)
 from leanctx.middleware import Middleware
 from leanctx.stats import CompressionStats
 
@@ -339,15 +345,15 @@ class Gemini:
     Exposes sync methods at ``client.models`` and async methods at
     ``client.aio.models``, matching the upstream SDK exactly.
 
-    **v0.1 limitation:** Gemini's ``contents`` parameter can be a
-    string, a list of strings, or a list of ``Content`` objects — none
-    of which map directly to the leanctx middleware's OpenAI-style
-    ``list[dict]`` message shape. Rather than ship a half-working
-    normalization, v0.1 intercepts ``generate_content`` to attach
-    zero-valued :class:`CompressionStats` telemetry and forwards the
-    request unmodified. Users who need actual compression should route
-    through :class:`Anthropic` or :class:`OpenAI` for now. Full
-    normalization lands in v0.2.
+    **v0.2 compression support:** ``contents`` may be a string, a list
+    of strings, or a list of ``Content`` objects / dicts whose ``parts``
+    are text. These shapes flow through the middleware and get
+    compressed like Anthropic/OpenAI requests.
+
+    Non-text parts (``function_call``, ``function_response``, images)
+    trigger an automatic bailout to passthrough — we never rewrite
+    function-call payloads because that would change tool semantics.
+    Multimodal and function-calling compression are v0.3 work.
     """
 
     def __init__(
@@ -375,15 +381,15 @@ class _GeminiModels:
         self._middleware = middleware
 
     def generate_content(self, *args: Any, **kwargs: Any) -> Any:
-        # v0.1: middleware is skipped for Gemini pending contents-shape
-        # normalization. See Gemini class docstring for details.
+        stats = _gemini_compress_in_place(kwargs, self._middleware)
         response = self._upstream.models.generate_content(*args, **kwargs)
-        _attach_telemetry(response, CompressionStats(), field="usage_metadata")
+        _attach_telemetry(response, stats, field="usage_metadata")
         return response
 
     def generate_content_stream(self, *args: Any, **kwargs: Any) -> Any:
-        # Streaming returns an iterator of chunks; telemetry aggregation
-        # across the stream is v0.2 work. Pass through untouched.
+        # Streaming chunk aggregation is a separate v0.3 piece; we still
+        # apply request-side compression so input tokens go down.
+        _gemini_compress_in_place(kwargs, self._middleware)
         return self._upstream.models.generate_content_stream(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
@@ -412,19 +418,63 @@ class _GeminiAsyncModels:
         self._middleware = middleware
 
     async def generate_content(self, *args: Any, **kwargs: Any) -> Any:
+        stats = await _gemini_compress_in_place_async(kwargs, self._middleware)
         response = await self._upstream.aio.models.generate_content(*args, **kwargs)
-        _attach_telemetry(response, CompressionStats(), field="usage_metadata")
+        _attach_telemetry(response, stats, field="usage_metadata")
         return response
 
     def generate_content_stream(self, *args: Any, **kwargs: Any) -> Any:
         # Upstream returns a coroutine that resolves to an async iterator.
-        # Forwarding it directly preserves that semantics — the caller
-        # awaits the result, then async-iterates. Not `async def` to avoid
-        # adding an extra coroutine layer.
-        return self._upstream.aio.models.generate_content_stream(*args, **kwargs)
+        # Request-side compression happens when the caller awaits this;
+        # we delay it via an async wrapper to keep the upstream's shape.
+        return _gemini_async_stream_wrapper(
+            self._upstream, self._middleware, args, kwargs
+        )
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
         if upstream is None:
             raise AttributeError(name)
         return getattr(upstream.aio.models, name)
+
+
+async def _gemini_async_stream_wrapper(
+    upstream: Any,
+    middleware: Middleware,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    await _gemini_compress_in_place_async(kwargs, middleware)
+    return await upstream.aio.models.generate_content_stream(*args, **kwargs)
+
+
+def _gemini_compress_in_place(
+    kwargs: dict[str, Any], middleware: Middleware
+) -> CompressionStats:
+    """Normalize kwargs['contents'], run it through the middleware, and
+    write the compressed form back into kwargs. Returns the stats so the
+    caller can attach them to the response.
+
+    On an opaque shape (non-text parts, unrecognized contents), the
+    original kwargs are left untouched and zero-valued stats are
+    returned.
+    """
+    contents = kwargs.get("contents")
+    messages, shape = _gemini_contents_to_messages(contents)
+    if shape.kind == "opaque":
+        return CompressionStats()
+    compressed, stats = middleware.compress_messages(messages)
+    kwargs["contents"] = _gemini_messages_to_contents(compressed, shape)
+    return stats
+
+
+async def _gemini_compress_in_place_async(
+    kwargs: dict[str, Any], middleware: Middleware
+) -> CompressionStats:
+    contents = kwargs.get("contents")
+    messages, shape = _gemini_contents_to_messages(contents)
+    if shape.kind == "opaque":
+        return CompressionStats()
+    compressed, stats = await middleware.compress_messages_async(messages)
+    kwargs["contents"] = _gemini_messages_to_contents(compressed, shape)
+    return stats

@@ -115,16 +115,19 @@ def test_gemini_stream_forwards_to_upstream() -> None:
     assert result is upstream.models.generate_content_stream.return_value
 
 
-def test_gemini_async_stream_forwards_to_upstream() -> None:
+@pytest.mark.asyncio
+async def test_gemini_async_stream_forwards_to_upstream() -> None:
+    # v0.2: request-side compression runs when the caller awaits, so
+    # generate_content_stream returns a coroutine that we must await.
     upstream = MagicMock()
+    upstream.aio.models.generate_content_stream = AsyncMock(return_value="async_iter")
+
     wrapper = _GeminiAsyncModels(upstream, Middleware({}))
-
-    # Async stream: our wrapper returns the coroutine from upstream directly
-    # (not `async def`), so the call is synchronous and returns whatever
-    # the mocked upstream call returns.
-    result = wrapper.generate_content_stream(model="gemini-2.5-pro", contents="hi")
-
-    upstream.aio.models.generate_content_stream.assert_called_once_with(
+    result = await wrapper.generate_content_stream(
         model="gemini-2.5-pro", contents="hi"
     )
-    assert result is upstream.aio.models.generate_content_stream.return_value
+
+    upstream.aio.models.generate_content_stream.assert_awaited_once_with(
+        model="gemini-2.5-pro", contents="hi"
+    )
+    assert result == "async_iter"
