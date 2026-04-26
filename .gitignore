@@ -55,3 +55,6 @@ ts/package-lock.json
 # Build artifacts
 *.tar.gz
 *.whl
+
+# humanize plugin state (generated)
+.humanize/
