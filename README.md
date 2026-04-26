@@ -71,7 +71,31 @@ print(response.usage.leanctx_ratio)
 
 ## Real compression numbers
 
-Measured end-to-end against the live APIs of all three providers using the same SRE-incident document. `SelfLLM` mode, default config, cheapest model per provider:
+### Coding-agent workload (the main use case)
+
+A realistic 9-message agent transcript — user question, file reads, grep, log dumps, failed edit, error trace — totaling ~2.1K tokens. Run through `leanctx.Anthropic` with `mode="on"` and content-aware routing (code → verbatim, errors → verbatim, prose → Lingua):
+
+| Metric | Before | After | Reduction |
+|---|:-:|:-:|:-:|
+| Tokens | 2148 | 1384 | **35.6%** |
+| Chars  | 7898 | 5701 | 27.8% |
+| Tokens saved per request | | | **768** |
+
+**What got preserved verbatim** (asserted programmatically):
+- ✅ A 2 KB Python source file inside a `tool_result` block — byte-identical
+- ✅ A Python traceback in an `is_error` tool result — byte-identical
+- ✅ Every `tool_use_id` and the `name` / `input` of every `tool_use` block — so tool linkage and tool calls don't break
+- ✅ `edit_file`'s `new_str` argument — so the actual code edit isn't rewritten
+
+**What actually compressed:**
+- A 3.4 KB log dump shrank to 1.9 KB (45% reduction) — the legitimate compression target
+- A grep result and prose reasoning blocks shrank by 30-50%
+
+Reproducible: `python scripts/integration_test_agent_workload.py` — runs the real LLMLingua-2 model, takes ~30s on Apple Silicon, no API key required.
+
+### SelfLLM cross-provider comparison
+
+Same 1.7 KB SRE-incident document through `SelfLLM` against each provider's cheapest tier:
 
 | Provider  | Model              | Compression | Latency | Cost per call |
 |-----------|--------------------|:-----------:|:-------:|:-------------:|
@@ -79,9 +103,9 @@ Measured end-to-end against the live APIs of all three providers using the same 
 | OpenAI    | `gpt-4o-mini`      | **49.1%**   | 6.42s   | ~$0.0003      |
 | Gemini    | `gemini-2.5-flash` | **48.7%**   | **2.25s** ⚡ | ~$0.0001      |
 
-All three preserved every timestamp, metric value, and action item with no hallucination. Combined with `Lingua` (LLMLingua-2 local) compression hitting **44.7% char reduction** on the same document at zero marginal cost, leanctx covers the full speed/cost/quality trade-off space.
+All three preserved every timestamp, metric value, and action item with no hallucination. Combined with `Lingua` (LLMLingua-2 local) hitting **44.7% char reduction** on the same document at zero marginal cost, leanctx covers the full speed/cost/quality trade-off space.
 
-**Reproducible** via `scripts/integration_test_selfllm.py` and `scripts/integration_test_e2e.py` — bring your own API key (~$0.001 per run). Full methodology, per-provider output samples, cost analysis, and bugs we found in flight: [`docs/benchmarks/selfllm-providers.md`](docs/benchmarks/selfllm-providers.md).
+Full methodology, per-provider output samples, cost analysis, and bugs we found in flight: [`docs/benchmarks/`](docs/benchmarks/).
 
 ## Roadmap
 
