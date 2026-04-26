@@ -143,7 +143,8 @@ Output is one JSON record per run with `schema_version: "1"` and a documented fi
 - [x] v0.1 — Python SDK, drop-in Anthropic/OpenAI/Gemini wrappers, `local` (LLMLingua-2) + `self_llm` (Anthropic), content classifier, router, dedup + purge-errors strategies, LangChain format helpers, Docker image
 - [x] v0.2 — `self_llm` on OpenAI + Gemini, block-aware compression (tool_use / tool_result preserved through Lingua), Gemini `contents` normalization (middleware actually runs), LangChain LCEL `compress_runnable`
 - [ ] v0.2.0 release — bump version, publish to PyPI + npm (placeholders at 0.0.0 today)
-- [ ] v0.3 — OTel observability, benchmark harness, ghcr.io Docker publish workflow, OpenAI responses-API intercept, multimodal + function-call compression for Gemini, LlamaIndex helpers, TypeScript SDK compression port
+- [x] v0.3 — OTel observability (API-only spans + metrics on every compression call across 12 wrapper paths), `leanctx bench` CLI (6 named scenarios + versioned JSON schema)
+- [ ] v0.3.x — ghcr.io Docker publish workflow, OpenAI responses-API intercept, multimodal + function-call compression for Gemini, LlamaIndex helpers, TypeScript SDK compression port
 - [ ] v0.4 — Helm chart, Kubernetes sidecar proxy deployment, stateful session dedup with explicit session IDs
 
 ## Install
