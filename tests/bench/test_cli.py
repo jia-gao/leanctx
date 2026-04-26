@@ -182,6 +182,55 @@ def test_run_runtime_error_exits_3(capsys: Any) -> None:
         scenarios.reset_for_tests()
 
 
+def test_required_extras_cli_preflight_exits_3_before_runner(
+    capsys: Any, monkeypatch: Any
+) -> None:
+    """AC-10: deterministic no-extras diagnostic. The CLI's preflight in
+    `_cmd_run` must reject missing required_extras BEFORE the runner is
+    invoked. Pin the contract: runner is never called, exit 3, scenario
+    name + extra name on stderr.
+
+    This is the path distinct from a runner-thrown RuntimeError — the
+    preflight in `cli._cmd_run` calls `_missing_extras(required_extras)`
+    which probes via `_extra_installed`. We monkeypatch that probe to
+    force-fail for our synthetic extra so this test is deterministic
+    regardless of which extras the test environment has installed."""
+    scenarios.reset_for_tests()
+
+    runner_called = {"n": 0}
+
+    @scenarios.register(
+        "test-preflight-extras",
+        description="required_extras preflight check",
+        required_extras=("synthetic-test-extra",),
+    )
+    def _runner(*, workload: str, **opts: Any) -> BenchRecord:
+        runner_called["n"] += 1
+        raise AssertionError("runner must not be invoked when required_extra is missing")
+
+    real_extra_installed = cli._extra_installed
+
+    def _patched(name: str) -> bool:
+        if name == "synthetic-test-extra":
+            return False
+        return real_extra_installed(name)
+
+    monkeypatch.setattr(cli, "_extra_installed", _patched)
+
+    try:
+        rc = cli.main(["run", "test-preflight-extras", "--workload", "rag"])
+        assert rc == 3
+        assert runner_called["n"] == 0, (
+            "CLI preflight failed to gate; runner was invoked despite missing extra"
+        )
+        captured = capsys.readouterr()
+        assert "test-preflight-extras" in captured.err
+        assert "synthetic-test-extra" in captured.err
+        assert "Traceback" not in captured.err
+    finally:
+        scenarios.reset_for_tests()
+
+
 def test_record_validation_rejects_missing_required_field() -> None:
     incomplete = {"schema_version": "1", "scenario": "x"}
     errors = validate_record(incomplete)
