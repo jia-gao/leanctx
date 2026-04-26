@@ -107,6 +107,37 @@ All three preserved every timestamp, metric value, and action item with no hallu
 
 Full methodology, per-provider output samples, cost analysis, and bugs we found in flight: [`docs/benchmarks/`](docs/benchmarks/).
 
+## Observability (v0.3)
+
+leanctx emits OpenTelemetry spans and metrics for every compression call, opt-in via `leanctx_config`. The library is **API-only**: it never owns the OTel SDK or registers providers. The application configures OTel; leanctx emits.
+
+```python
+client = leanctx.Anthropic(
+    leanctx_config={
+        "mode": "on",
+        "observability": {"otel": True},
+    }
+)
+```
+
+Every wrapper-routed call produces one root `leanctx.compress` span with `provider`, `method`, `input_tokens`, `output_tokens`, `cost_usd`, and `duration_ms`, plus per-compressor child spans for granular tracing. Five metrics (4 counters + 1 histogram) are recorded with `provider`/`method`/`status` labels.
+
+See [`docs/observability.md`](docs/observability.md) for the full attribute reference, span lifetime contract for streaming paths, sample app-side OTel SDK setup, and the closed `leanctx.method` taxonomy.
+
+## Reproducible benchmarks (v0.3)
+
+The `leanctx bench` CLI runs the offline integration scenarios with deterministic input and emits versioned JSON records:
+
+```bash
+leanctx bench list                                  # registered scenarios
+leanctx bench run lingua-local --workload rag       # offline lingua compression
+leanctx bench run agent-structural --workload agent # 5 structural-integrity invariants enforced
+leanctx bench run anthropic-e2e --workload chat     # full stack, respx-mocked Anthropic
+leanctx bench run selfllm-anthropic --workload rag  # live API (requires ANTHROPIC_API_KEY)
+```
+
+Output is one JSON record per run with `schema_version: "1"` and a documented field set so downstream tooling can consume it.
+
 ## Roadmap
 
 - [x] v0.1 — Python SDK, drop-in Anthropic/OpenAI/Gemini wrappers, `local` (LLMLingua-2) + `self_llm` (Anthropic), content classifier, router, dedup + purge-errors strategies, LangChain format helpers, Docker image

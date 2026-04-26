@@ -169,17 +169,15 @@ These are negligible compared to the *savings* on the main request. If your main
 ## How to reproduce
 
 ```bash
-# Anthropic
-ANTHROPIC_API_KEY=sk-ant-... \
-  python scripts/integration_test_selfllm.py
+# v0.3: via leanctx bench (preferred)
+ANTHROPIC_API_KEY=sk-ant-... leanctx bench run selfllm-anthropic --workload rag
+OPENAI_API_KEY=sk-...        leanctx bench run selfllm-openai    --workload rag
+GEMINI_API_KEY=...           leanctx bench run selfllm-gemini    --workload rag
 
-# OpenAI
-OPENAI_API_KEY=sk-... \
-  python scripts/integration_test_selfllm.py --provider openai
-
-# Gemini
-GEMINI_API_KEY=... \
-  python scripts/integration_test_selfllm.py --provider gemini
+# Pre-v0.3: standalone script (still works)
+ANTHROPIC_API_KEY=sk-ant-... python scripts/integration_test_selfllm.py
+OPENAI_API_KEY=sk-...        python scripts/integration_test_selfllm.py --provider openai
+GEMINI_API_KEY=...           python scripts/integration_test_selfllm.py --provider gemini
 
 # Override the cheap default if you want frontier-model summaries
 python scripts/integration_test_selfllm.py \

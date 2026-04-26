@@ -1,7 +1,8 @@
 # Coding-agent workload: end-to-end compression
 
 **Date:** 2026-04-25
-**Reproducible via:** [`scripts/integration_test_agent_workload.py`](../../scripts/integration_test_agent_workload.py)
+**Reproducible via:** `leanctx bench run agent-structural --workload agent`
+([source: `scripts/integration_test_agent_workload.py`](../../scripts/integration_test_agent_workload.py))
 
 ## Why this benchmark exists
 
@@ -143,12 +144,20 @@ The break-even is essentially immediate.
 
 ## Reproducing
 
+The v0.3 way (recommended) — runs the same scenario through `leanctx bench`:
+
 ```bash
 pip install 'leanctx[lingua,anthropic,bench]'
-python scripts/integration_test_agent_workload.py
+leanctx bench run agent-structural --workload agent
 ```
 
-The `bench` extra adds `respx`, which mocks the Anthropic HTTP endpoint so this script needs no API key. First run downloads ~1.2 GB of model weights to `~/.cache/huggingface/`; subsequent runs use the cached model and complete in <30s end-to-end. The script exits non-zero on any structural-integrity regression (mutated code block, mutated error, broken tool linkage, mutated tool input, or log payload that fails to compress).
+The `bench` extra adds `respx`, which mocks the Anthropic HTTP endpoint so this scenario needs no API key. First run downloads ~1.2 GB of LLMLingua-2 model weights to `~/.cache/huggingface/`; subsequent runs use the cached model and complete in <30s end-to-end. The CLI exits non-zero on any structural-integrity regression (mutated code block, mutated error, broken tool linkage, mutated tool input, or log payload that fails to compress) and emits a JSON record with the per-invariant pass/fail under the `invariants` field.
+
+Pre-v0.3 invocation (still works — runs the standalone script):
+
+```bash
+python scripts/integration_test_agent_workload.py
+```
 
 ## See also
 

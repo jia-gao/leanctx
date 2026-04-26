@@ -78,6 +78,7 @@ def _ensure_loaded() -> None:
         agent_structural,
         anthropic_e2e,
         lingua_local,
+        selfllm_provider,
     )
 
 
