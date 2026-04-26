@@ -71,11 +71,17 @@ print(response.usage.leanctx_ratio)
 
 ## Real compression numbers
 
-Measured end-to-end with the real LLMLingua-2 model (`scripts/integration_test_e2e.py`):
+Measured end-to-end against the live APIs of all three providers using the same SRE-incident document. `SelfLLM` mode, default config, cheapest model per provider:
 
-- 4,450 chars in → 2,462 chars sent on the wire to `api.openai.com` (**44.7% reduction**)
-- 395 tokens saved per request at `mode="on", ratio=0.5`
-- `response.usage.leanctx_method == "lingua"` verifies the pipeline executed
+| Provider  | Model              | Compression | Latency | Cost per call |
+|-----------|--------------------|:-----------:|:-------:|:-------------:|
+| Anthropic | `claude-haiku-4-5` | **41.6%**   | 3.05s   | ~$0.0016      |
+| OpenAI    | `gpt-4o-mini`      | **49.1%**   | 6.42s   | ~$0.0003      |
+| Gemini    | `gemini-2.5-flash` | **48.7%**   | **2.25s** ⚡ | ~$0.0001      |
+
+All three preserved every timestamp, metric value, and action item with no hallucination. Combined with `Lingua` (LLMLingua-2 local) compression hitting **44.7% char reduction** on the same document at zero marginal cost, leanctx covers the full speed/cost/quality trade-off space.
+
+**Reproducible** via `scripts/integration_test_selfllm.py` and `scripts/integration_test_e2e.py` — bring your own API key (~$0.001 per run). Full methodology, per-provider output samples, cost analysis, and bugs we found in flight: [`docs/benchmarks/selfllm-providers.md`](docs/benchmarks/selfllm-providers.md).
 
 ## Roadmap
 
