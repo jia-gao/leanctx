@@ -65,6 +65,16 @@ _OPENAI_REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
 def _is_openai_reasoning_model(model: str) -> bool:
     return model.startswith(_OPENAI_REASONING_PREFIXES)
 
+
+# Gemini 2.5+ models support a "thinking" mode that consumes the output
+# token budget on hidden reasoning before producing visible text. We
+# disable it for compression so the budget produces a real summary.
+_GEMINI_THINKING_PREFIXES = ("gemini-2.5", "gemini-3")
+
+
+def _is_gemini_thinking_model(model: str) -> bool:
+    return model.startswith(_GEMINI_THINKING_PREFIXES)
+
 _SYSTEM_PROMPT = """You are a context compression assistant.
 Produce a compact, faithful summary of the provided content that
 preserves everything a downstream model would need to continue the
@@ -246,13 +256,21 @@ class SelfLLM:
 
     def _call_gemini(self, client: Any, user_prompt: str) -> _Completion:
         # Gemini puts the system instruction in `config`, not in messages.
+        config: dict[str, Any] = {
+            "system_instruction": _SYSTEM_PROMPT,
+            "max_output_tokens": self.max_summary_tokens,
+        }
+        # Gemini 2.5+ thinking models otherwise burn the entire output
+        # budget on hidden thinking tokens, leaving an empty / truncated
+        # visible response. thinking_budget=0 disables thinking entirely
+        # for this call.
+        if _is_gemini_thinking_model(self.model):
+            config["thinking_config"] = {"thinking_budget": 0}
+
         response = client.models.generate_content(
             model=self.model,
             contents=user_prompt,
-            config={
-                "system_instruction": _SYSTEM_PROMPT,
-                "max_output_tokens": self.max_summary_tokens,
-            },
+            config=config,
         )
         text_out = getattr(response, "text", "") or ""
         usage = getattr(response, "usage_metadata", None)

@@ -346,6 +346,34 @@ def test_selfllm_gemini_uses_system_instruction_in_config() -> None:
     assert kwargs["config"]["max_output_tokens"] == 250
 
 
+def test_selfllm_gemini_disables_thinking_for_2_5_models() -> None:
+    # Default model is gemini-2.5-flash, a thinking model. Without
+    # thinking_budget=0 it silently burns the output-token budget on
+    # hidden thinking tokens.
+    llm = SelfLLM(provider="gemini")
+    fake = MagicMock()
+    fake.models.generate_content.return_value = _fake_gemini_response()
+    llm._client = fake
+
+    llm.compress([{"role": "user", "content": "x"}])
+
+    kwargs = fake.models.generate_content.call_args.kwargs
+    assert kwargs["config"]["thinking_config"] == {"thinking_budget": 0}
+
+
+def test_selfllm_gemini_no_thinking_config_for_legacy_models() -> None:
+    # Gemini 1.5 doesn't support thinking_config; passing it would error.
+    llm = SelfLLM(provider="gemini", model="gemini-1.5-flash")
+    fake = MagicMock()
+    fake.models.generate_content.return_value = _fake_gemini_response()
+    llm._client = fake
+
+    llm.compress([{"role": "user", "content": "x"}])
+
+    kwargs = fake.models.generate_content.call_args.kwargs
+    assert "thinking_config" not in kwargs["config"]
+
+
 def test_selfllm_gemini_missing_usage_metadata_handled() -> None:
     llm = SelfLLM(provider="gemini")
     fake = MagicMock()
