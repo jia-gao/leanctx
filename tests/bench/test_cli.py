@@ -27,6 +27,16 @@ def test_list_human_output_includes_all_six_scenarios(capsys: Any) -> None:
         assert name in captured.out, f"missing scenario {name!r} in `bench list` output"
 
 
+def test_bench_prefix_is_optional(capsys: Any) -> None:
+    """The entry point is `leanctx`, but README/docs say `leanctx bench list/run`.
+    The CLI must accept BOTH `leanctx list` and `leanctx bench list`."""
+    rc = cli.main(["bench", "list"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    for name in _REQUIRED_SCENARIOS:
+        assert name in captured.out
+
+
 def test_list_json_output_is_valid(capsys: Any) -> None:
     rc = cli.main(["list", "--json"])
     assert rc == 0

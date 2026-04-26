@@ -66,7 +66,14 @@ def _make_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = _make_parser()
-    args = parser.parse_args(argv)
+    # Accept `leanctx bench {list,run}` (matches README/docs UX) and
+    # the equivalent direct form `leanctx {list,run}`. The entry point
+    # is `leanctx`; if the first arg is "bench", swallow it so the
+    # argparse subcommand sees the actual `list`/`run` token.
+    raw = list(sys.argv[1:]) if argv is None else list(argv)
+    if raw and raw[0] == "bench":
+        raw = raw[1:]
+    args = parser.parse_args(raw)
     if args.cmd is None:
         parser.print_help()
         return 0
