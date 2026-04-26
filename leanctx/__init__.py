@@ -11,6 +11,7 @@ from leanctx.classifier import RepeatTracker, classify
 from leanctx.client import Anthropic, AsyncAnthropic, AsyncOpenAI, Gemini, OpenAI
 from leanctx.compressors import Compressor, ContentType, Lingua, SelfLLM, Verbatim
 from leanctx.middleware import Middleware
+from leanctx.observability import MethodStatus, ObservabilityConfig
 from leanctx.router import Router
 from leanctx.stats import CompressionStats
 from leanctx.strategies import DedupStrategy, PurgeErrorsStrategy, Strategy
@@ -27,7 +28,9 @@ __all__ = [
     "DedupStrategy",
     "Gemini",
     "Lingua",
+    "MethodStatus",
     "Middleware",
+    "ObservabilityConfig",
     "OpenAI",
     "PurgeErrorsStrategy",
     "RepeatTracker",

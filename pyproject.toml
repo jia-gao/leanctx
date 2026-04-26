@@ -46,6 +46,13 @@ tokens = ["tiktoken>=0.7"]
 # 'bench' is for users who want to run the integration_test_*.py
 # benchmark scripts. respx mocks provider HTTP so no API key is needed.
 bench = ["respx>=0.21.0"]
+# 'otel' enables OpenTelemetry spans + metrics. leanctx is API-only:
+# it never owns the SDK or exporter; the application is responsible for
+# configuring TracerProvider / MeterProvider / exporters.
+otel = [
+    "opentelemetry-api>=1.30,<2.0",
+    "opentelemetry-sdk>=1.30,<2.0",
+]
 all = [
     "anthropic>=0.40.0",
     "openai>=1.50.0",
@@ -53,6 +60,8 @@ all = [
     "llmlingua>=0.2.0",
     "tiktoken>=0.7",
     "respx>=0.21.0",
+    "opentelemetry-api>=1.30,<2.0",
+    "opentelemetry-sdk>=1.30,<2.0",
 ]
 dev = [
     "pytest>=8.0",
@@ -107,6 +116,8 @@ module = [
     "torch.*",
     "langchain_core",
     "langchain_core.*",
+    "opentelemetry",
+    "opentelemetry.*",
 ]
 ignore_missing_imports = true
 
