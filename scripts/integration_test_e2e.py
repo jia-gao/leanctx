@@ -15,26 +15,21 @@ This is the full v0.1 pipeline exercised top to bottom:
         ↓
     httpx / respx (mocked at the socket boundary)
 
-Requires: ``pip install 'leanctx[dev,lingua]'``
+Requires: ``pip install 'leanctx[lingua,anthropic,bench]'``. Runs
+against the real LLMLingua-2 model (1.2 GB; downloads on first run,
+cached afterwards) with respx mocking the Anthropic endpoint so no
+API key is needed.
 """
 
 from __future__ import annotations
 
-# Force HuggingFace offline BEFORE any imports that may transitively load
-# transformers — otherwise loading LLMLingua-2 makes network calls to
-# huggingface.co that respx would intercept and fail.
-import os
+import json
+import time
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+import respx
+from httpx import Response
 
-import json  # noqa: E402
-import time  # noqa: E402
-
-import respx  # noqa: E402
-from httpx import Response  # noqa: E402
-
-from leanctx import Anthropic  # noqa: E402
+from leanctx import Anthropic
 
 LONG_PROSE = (
     "Cloud-native architectures have become the dominant paradigm for deploying "
@@ -66,11 +61,21 @@ def _mock_response() -> dict:
 
 def main() -> None:
     print("=== leanctx.Anthropic + real Lingua + mocked Anthropic API ===\n")
+    print("(First run downloads ~1.2 GB of LLMLingua-2 weights; cached afterwards.)\n")
 
-    with respx.mock(base_url="https://api.anthropic.com") as mock:
+    # assert_all_called=False because the HuggingFace pass-through routes
+    # are only hit on first run; on cached runs they're unused and respx
+    # would otherwise flag that as a failure.
+    with respx.mock(
+        base_url="https://api.anthropic.com", assert_all_called=False
+    ) as mock:
         route = mock.post("/v1/messages").mock(
             return_value=Response(200, json=_mock_response())
         )
+        # Let HuggingFace requests through to the real network so the
+        # LLMLingua-2 model can download / refresh tokenizer files.
+        mock.route(host__regex=r".*huggingface\.co").pass_through()
+        mock.route(host__regex=r".*hf\.co").pass_through()
 
         client = Anthropic(
             api_key="sk-test",

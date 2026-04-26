@@ -144,11 +144,11 @@ The break-even is essentially immediate.
 ## Reproducing
 
 ```bash
-pip install 'leanctx[lingua,anthropic]'
+pip install 'leanctx[lingua,anthropic,bench]'
 python scripts/integration_test_agent_workload.py
 ```
 
-First run downloads ~1.2 GB of model weights to `~/.cache/huggingface/`. Subsequent runs use the cached model and complete in <30s end-to-end.
+The `bench` extra adds `respx`, which mocks the Anthropic HTTP endpoint so this script needs no API key. First run downloads ~1.2 GB of model weights to `~/.cache/huggingface/`; subsequent runs use the cached model and complete in <30s end-to-end. The script exits non-zero on any structural-integrity regression (mutated code block, mutated error, broken tool linkage, mutated tool input, or log payload that fails to compress).
 
 ## See also
 

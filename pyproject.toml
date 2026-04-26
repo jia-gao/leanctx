@@ -43,12 +43,16 @@ openai = ["openai>=1.50.0"]
 gemini = ["google-genai>=0.3.0"]
 lingua = ["llmlingua>=0.2.0"]
 tokens = ["tiktoken>=0.7"]
+# 'bench' is for users who want to run the integration_test_*.py
+# benchmark scripts. respx mocks provider HTTP so no API key is needed.
+bench = ["respx>=0.21.0"]
 all = [
     "anthropic>=0.40.0",
     "openai>=1.50.0",
     "google-genai>=0.3.0",
     "llmlingua>=0.2.0",
     "tiktoken>=0.7",
+    "respx>=0.21.0",
 ]
 dev = [
     "pytest>=8.0",
@@ -76,6 +80,13 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Benchmark scripts contain string-literal fixtures (simulated grep output,
+# log dumps) where realistic line widths matter for the test to mean
+# anything. E501 (line-too-long) inside those fixtures is not a code-quality
+# issue.
+"scripts/integration_test_*.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.10"

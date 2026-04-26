@@ -16,9 +16,10 @@ content-aware routing config. Reports:
 * Verification that tool_use_id linkage survived
 * Verification that code blocks were preserved verbatim
 
-Requires: ``pip install 'leanctx[lingua,anthropic]'``. Runs against the
-real LLMLingua-2 model (1.2 GB, cached after first run) with respx
-mocking the Anthropic endpoint so no API key is needed.
+Requires: ``pip install 'leanctx[lingua,anthropic,bench]'``. Runs
+against the real LLMLingua-2 model (1.2 GB; downloads on first run,
+cached afterwards) with respx mocking the Anthropic endpoint so no
+API key is needed.
 
 Run with::
 
@@ -27,22 +28,16 @@ Run with::
 
 from __future__ import annotations
 
-# Force HF offline so respx doesn't have to mock HuggingFace traffic.
-import os
+import json
+import time
+from typing import Any
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+import respx
+from httpx import Response
 
-import json  # noqa: E402
-import time  # noqa: E402
-from typing import Any  # noqa: E402
-
-import respx  # noqa: E402
-from httpx import Response  # noqa: E402
-
-from leanctx import Anthropic  # noqa: E402
-from leanctx._content import get_text_content  # noqa: E402
-from leanctx.tokens import count_message_tokens  # noqa: E402
+from leanctx import Anthropic
+from leanctx._content import get_text_content
+from leanctx.tokens import count_message_tokens
 
 # --------------------------------------------------------------------------- #
 # Realistic agent transcript fixture
@@ -341,9 +336,12 @@ def _find_block(
         if not isinstance(content, list):
             continue
         for block in content:
-            if isinstance(block, dict) and block.get("type") == block_type:
-                if block.get(attr) == value:
-                    return block
+            if (
+                isinstance(block, dict)
+                and block.get("type") == block_type
+                and block.get(attr) == value
+            ):
+                return block
     return None
 
 
@@ -400,11 +398,24 @@ def main() -> None:
 
     # End-to-end: leanctx.Anthropic + real Lingua model + respx-mocked Anthropic
     print("Sending through leanctx.Anthropic (real Lingua, mocked HTTP)...")
+    print("(First run downloads ~1.2 GB of LLMLingua-2 weights; cached afterwards.)")
     t0 = time.monotonic()
-    with respx.mock(base_url="https://api.anthropic.com") as mock:
+    # assert_all_called=False because the HuggingFace pass-through
+    # routes are only hit on first run / template-freshness checks; on
+    # cached runs they're unused and respx would otherwise flag that.
+    with respx.mock(
+        base_url="https://api.anthropic.com", assert_all_called=False
+    ) as mock:
         route = mock.post("/v1/messages").mock(
             return_value=Response(200, json=_mock_anthropic_response())
         )
+        # Let HuggingFace requests through to the real network so the
+        # LLMLingua-2 model can download (first run) or do its cache /
+        # template freshness checks (subsequent runs). Without this,
+        # respx's "all unmocked requests fail" rule blocks model load.
+        mock.route(host__regex=r".*huggingface\.co").pass_through()
+        mock.route(host__regex=r".*hf\.co").pass_through()
+
         client = Anthropic(api_key="sk-test", leanctx_config=leanctx_config)
         response = client.messages.create(
             model="claude-sonnet-4-6",
@@ -472,7 +483,12 @@ def main() -> None:
     code_preserved = src_block["content"] == _AUTH_MIDDLEWARE_PY
     print(
         f"  code block preserved verbatim: "
-        f"{'✅' if code_preserved else '⚠️ '}  (auth/middleware.py)"
+        f"{'✅' if code_preserved else '❌'}  (auth/middleware.py)"
+    )
+    assert code_preserved, (
+        "auth/middleware.py was mutated by the compressor — this would "
+        "silently corrupt code in production. The classifier should route "
+        "code blocks to Verbatim."
     )
 
     # 3. Error block preserved verbatim
@@ -481,7 +497,11 @@ def main() -> None:
     err_preserved = err_block["content"] == _EDIT_FAILURE
     print(
         f"  error block preserved verbatim: "
-        f"{'✅' if err_preserved else '⚠️ '}  (file-modified error)"
+        f"{'✅' if err_preserved else '❌'}  (file-modified error)"
+    )
+    assert err_preserved, (
+        "Error tool_result was mutated — would strip diagnostic information "
+        "agents rely on. Errors should route to Verbatim."
     )
 
     # 4. tool_use input fields preserved exactly (compressing these would
@@ -512,7 +532,11 @@ def main() -> None:
     )
     print(
         f"  log output was compressed:     "
-        f"{'✅' if log_compressed else '⚠️ '}  ({len(_LOG_OUTPUT)} → {log_after} chars)"
+        f"{'✅' if log_compressed else '❌'}  ({len(_LOG_OUTPUT)} → {log_after} chars)"
+    )
+    assert log_compressed, (
+        f"log output didn't shrink ({len(_LOG_OUTPUT)} → {log_after}) — "
+        "classifier or router likely misconfigured for the prose-heavy path."
     )
 
     print("\nOK")
