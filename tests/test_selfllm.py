@@ -61,7 +61,10 @@ def test_selfllm_unsupported_provider_raises_at_construction() -> None:
 
 def test_selfllm_default_model_resolves_per_provider() -> None:
     assert SelfLLM(provider="anthropic").model.startswith("claude-haiku")
-    assert SelfLLM(provider="openai").model.startswith("gpt-")
+    # OpenAI default must be a non-reasoning model so the completion
+    # token budget actually produces visible output. gpt-4o-mini works;
+    # gpt-5-nano (reasoning) burns the whole budget on hidden tokens.
+    assert SelfLLM(provider="openai").model == "gpt-4o-mini"
     assert SelfLLM(provider="gemini").model.startswith("gemini-")
 
 
@@ -229,6 +232,53 @@ def test_selfllm_openai_passes_system_and_user_messages() -> None:
     assert kwargs["messages"][0]["role"] == "system"
     assert kwargs["messages"][1]["role"] == "user"
     assert kwargs["max_completion_tokens"] == 300
+    # Default model (gpt-4o-mini) is non-reasoning, so we should NOT
+    # pass reasoning_effort.
+    assert "reasoning_effort" not in kwargs
+
+
+def test_selfllm_openai_sets_minimal_reasoning_effort_for_gpt5() -> None:
+    # gpt-5 family is reasoning; without effort="minimal" the model
+    # silently burns the completion-token budget on hidden reasoning.
+    llm = SelfLLM(provider="openai", model="gpt-5-nano")
+    fake = MagicMock()
+    fake.chat.completions.create.return_value = _fake_openai_response()
+    llm._client = fake
+
+    llm.compress([{"role": "user", "content": "x"}])
+
+    kwargs = fake.chat.completions.create.call_args.kwargs
+    assert kwargs["reasoning_effort"] == "minimal"
+
+
+def test_selfllm_openai_sets_minimal_reasoning_effort_for_o_series() -> None:
+    for model in ("o1-mini", "o3-mini", "o4-mini"):
+        llm = SelfLLM(provider="openai", model=model)
+        fake = MagicMock()
+        fake.chat.completions.create.return_value = _fake_openai_response()
+        llm._client = fake
+
+        llm.compress([{"role": "user", "content": "x"}])
+
+        kwargs = fake.chat.completions.create.call_args.kwargs
+        assert kwargs.get("reasoning_effort") == "minimal", (
+            f"expected minimal reasoning_effort for {model}"
+        )
+
+
+def test_selfllm_openai_no_reasoning_effort_for_non_reasoning_models() -> None:
+    for model in ("gpt-4o-mini", "gpt-4.1-mini", "gpt-4-turbo"):
+        llm = SelfLLM(provider="openai", model=model)
+        fake = MagicMock()
+        fake.chat.completions.create.return_value = _fake_openai_response()
+        llm._client = fake
+
+        llm.compress([{"role": "user", "content": "x"}])
+
+        kwargs = fake.chat.completions.create.call_args.kwargs
+        assert "reasoning_effort" not in kwargs, (
+            f"unexpected reasoning_effort for non-reasoning model {model}"
+        )
 
 
 def test_selfllm_openai_empty_choices_handled() -> None:

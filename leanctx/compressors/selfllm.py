@@ -42,11 +42,28 @@ _SUPPORTED_PROVIDERS = frozenset({"anthropic", "openai", "gemini"})
 
 # Sensible cheap default per provider. Users override via the ``model``
 # kwarg when they want frontier quality on compression too.
+#
+# OpenAI default is gpt-4o-mini rather than gpt-5-nano because the
+# nano-tier of GPT-5 is a reasoning model — for summarization that
+# quietly burns the entire completion-token budget on hidden reasoning
+# tokens, leaving zero tokens for the actual summary. Users who want
+# GPT-5 nano specifically still work correctly because ``_call_openai``
+# auto-applies ``reasoning_effort="minimal"`` for reasoning models.
 _DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-haiku-4-5",
-    "openai": "gpt-5-nano",
+    "openai": "gpt-4o-mini",
     "gemini": "gemini-2.5-flash",
 }
+
+# OpenAI model prefixes that are reasoning models. They support a
+# ``reasoning_effort`` kwarg; without setting it to "minimal" they
+# consume completion tokens on internal reasoning rather than visible
+# output.
+_OPENAI_REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
+def _is_openai_reasoning_model(model: str) -> bool:
+    return model.startswith(_OPENAI_REASONING_PREFIXES)
 
 _SYSTEM_PROMPT = """You are a context compression assistant.
 Produce a compact, faithful summary of the provided content that
@@ -199,14 +216,23 @@ class SelfLLM:
         )
 
     def _call_openai(self, client: Any, user_prompt: str) -> _Completion:
-        response = client.chat.completions.create(
-            model=self.model,
-            max_completion_tokens=self.max_summary_tokens,
-            messages=[
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_completion_tokens": self.max_summary_tokens,
+            "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-        )
+        }
+        # GPT-5 + o-series are reasoning models. Without
+        # reasoning_effort="minimal" they spend the completion-token
+        # budget on internal reasoning and the visible response is
+        # empty. Compression doesn't need extended reasoning, so always
+        # opt for minimal effort on these families.
+        if _is_openai_reasoning_model(self.model):
+            create_kwargs["reasoning_effort"] = "minimal"
+
+        response = client.chat.completions.create(**create_kwargs)
         text_out = ""
         if response.choices:
             msg = response.choices[0].message
