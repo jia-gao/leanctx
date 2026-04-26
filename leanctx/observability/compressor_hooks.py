@@ -89,13 +89,14 @@ class _CompressorSpan:
     def set_error(self, exc: BaseException) -> None:
         self._set("leanctx.error", True)
         self._set("error.type", type(exc).__name__)
-        self._set("error.message", str(exc))
+        # error.message intentionally omitted — see compression_span
+        # rationale: exception strings are unbounded and may carry PII.
         try:
             from opentelemetry.trace import Status, StatusCode  # noqa: PLC0415
 
             setter = getattr(self._span, "set_status", None)
             if setter is not None:
-                setter(Status(StatusCode.ERROR, str(exc)))
+                setter(Status(StatusCode.ERROR, type(exc).__name__))
         except Exception:
             pass
 

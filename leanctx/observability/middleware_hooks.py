@@ -145,13 +145,17 @@ class _LeanctxSpan:
         self._status = "error"
         self._set("leanctx.error", True)
         self._set("error.type", type(exc).__name__)
-        self._set("error.message", str(exc))
+        # Deliberately omit error.message — exception strings can carry
+        # request-specific or user-originated content (PII, IDs) and are
+        # unbounded for cardinality. The OTel `Status.description` below
+        # remains for traces backends that surface it; that field is
+        # not a metric label and is bounded per-trace, not aggregated.
         try:
             from opentelemetry.trace import Status, StatusCode  # noqa: PLC0415
 
             setter = getattr(self._span, "set_status", None)
             if setter is not None:
-                setter(Status(StatusCode.ERROR, str(exc)))
+                setter(Status(StatusCode.ERROR, type(exc).__name__))
         except Exception:
             pass
 

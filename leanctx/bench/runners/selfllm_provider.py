@@ -96,7 +96,11 @@ def run_openai(*, workload: str, **opts: object) -> BenchRecord:
     "selfllm-gemini",
     description="SelfLLM compression via Gemini (2.5-flash) live API.",
     required_extras=("gemini",),
-    required_env=("GEMINI_API_KEY",),
+    # Either GEMINI_API_KEY or GOOGLE_API_KEY satisfies the credential
+    # requirement — the google-genai SDK reads either. The CLI's
+    # required_env preflight treats this tuple as ANY-of (see
+    # _missing_env in cli.py).
+    required_env=("GEMINI_API_KEY|GOOGLE_API_KEY",),
 )
 def run_gemini(*, workload: str, **opts: object) -> BenchRecord:
     return _run_selfllm("gemini", workload)

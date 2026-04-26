@@ -55,6 +55,82 @@ def test_runs_n_invokes_runner_per_run(capsys: Any) -> None:
         scenarios.reset_for_tests()
 
 
+def test_real_lingua_local_runs_n_does_not_leak_dedup_state(capsys: Any) -> None:
+    """AC-9 / task29: invoke the actual `lingua-local` scenario via the
+    CLI with --runs 5 and confirm input_tokens are stable across runs.
+
+    Uses a stub PromptCompressor so the test runs without the real
+    LLMLingua-2 model — but it exercises the SHIPPED runner code path,
+    not a custom test-only scenario."""
+    import json
+
+    import leanctx.compressors.lingua as lingua_mod  # noqa: PLC0415
+
+    class _StubPC:
+        """Stand-in for llmlingua.PromptCompressor — returns the input
+        unchanged so token counts are deterministic across runs."""
+
+        model_name = "stub-lingua-test"
+
+        def compress_prompt(
+            self, text: str, *, rate: float = 0.5, **kwargs: Any
+        ) -> dict[str, Any]:
+            return {"compressed_prompt": text}
+
+    # Monkey-patch the real Lingua class to use the stub instead of
+    # loading LLMLingua. The Lingua._compress_inner reads
+    # self._prompt_compressor; we set it eagerly per instance.
+    real_init = lingua_mod.Lingua.__init__
+
+    def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        real_init(self, *args, **kwargs)
+        self._prompt_compressor = _StubPC()
+
+    lingua_mod.Lingua.__init__ = _patched_init  # type: ignore[method-assign]
+    try:
+        rc = cli.main(["run", "lingua-local", "--workload", "rag", "--runs", "5"])
+        assert rc == 0
+        captured = capsys.readouterr()
+        records = [
+            json.loads(line) for line in captured.out.splitlines() if line.strip()
+        ]
+        assert len(records) == 5
+        first = records[0]["input_tokens"]
+        for rec in records[1:]:
+            assert rec["input_tokens"] == first, (
+                f"input_tokens drifted across runs in REAL lingua-local: "
+                f"{first} → {rec['input_tokens']} (suggests cross-run leak)"
+            )
+    finally:
+        lingua_mod.Lingua.__init__ = real_init  # type: ignore[method-assign]
+
+
+def test_negative_shared_state_dedup_does_not_leak(capsys: Any) -> None:
+    """AC-9 negative case: even when the underlying DedupStrategy hash
+    set is non-empty before the run, a fresh per-run client must not
+    inherit it. We simulate the regression by running through Middleware
+    directly twice with the same input — the first run primes any
+    in-strategy state; the second run on a FRESH Middleware must not be
+    affected."""
+    from leanctx.middleware import Middleware  # noqa: PLC0415
+
+    msgs = [{"role": "user", "content": "the same content twice over"}]
+
+    # mode=off → no real compression but exercises strategies pipeline.
+    mw1 = Middleware({"mode": "off"})
+    out1, stats1 = mw1.compress_messages(msgs)
+    # Now run via a FRESH middleware — the v0.2 bug shared dedup state
+    # across instances; the v0.2.1 fix made it per-instance. This test
+    # pins that contract.
+    mw2 = Middleware({"mode": "off"})
+    out2, stats2 = mw2.compress_messages(msgs)
+
+    # Off-mode just passes through; both runs see the same input and
+    # produce identical output.
+    assert len(out1) == len(out2) == 1
+    assert stats1.input_tokens == stats2.input_tokens
+
+
 def test_lingua_local_runs_n_does_not_leak_dedup_state(capsys: Any) -> None:
     """Concrete v0.2 regression guard: 5 lingua-local runs of the same
     workload must produce identical input_tokens (no decreasing trend

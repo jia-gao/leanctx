@@ -8,13 +8,23 @@ from typing import Any
 from leanctx.bench import cli, scenarios
 from leanctx.bench.schema import BenchRecord, validate_record
 
+_REQUIRED_SCENARIOS = {
+    "lingua-local",
+    "anthropic-e2e",
+    "selfllm-anthropic",
+    "selfllm-openai",
+    "selfllm-gemini",
+    "agent-structural",
+}
 
-def test_list_human_output_includes_three_scenarios(capsys: Any) -> None:
+
+def test_list_human_output_includes_all_six_scenarios(capsys: Any) -> None:
+    """AC-7: bench list must show all six plan-required scenarios."""
     rc = cli.main(["list"])
     assert rc == 0
     captured = capsys.readouterr()
-    for name in ("lingua-local", "anthropic-e2e", "agent-structural"):
-        assert name in captured.out
+    for name in _REQUIRED_SCENARIOS:
+        assert name in captured.out, f"missing scenario {name!r} in `bench list` output"
 
 
 def test_list_json_output_is_valid(capsys: Any) -> None:
@@ -24,7 +34,24 @@ def test_list_json_output_is_valid(capsys: Any) -> None:
     payload = json.loads(captured.out)
     assert "scenarios" in payload
     names = {s["name"] for s in payload["scenarios"]}
-    assert {"lingua-local", "anthropic-e2e", "agent-structural"}.issubset(names)
+    assert _REQUIRED_SCENARIOS.issubset(names), (
+        f"missing required scenarios: {_REQUIRED_SCENARIOS - names}"
+    )
+
+
+def test_reset_for_tests_restores_builtins(capsys: Any) -> None:
+    """Regression guard: after reset_for_tests(), the next list_scenarios()
+    call must re-register the built-in scenarios. Previous bug: cleared
+    _LOADED + _REGISTRY, but Python module cache prevented re-registration."""
+    scenarios.reset_for_tests()
+    # First public call re-loads the built-ins.
+    rc = cli.main(["list"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    for name in _REQUIRED_SCENARIOS:
+        assert name in captured.out, (
+            f"reset_for_tests() did not restore built-in scenario {name!r}"
+        )
 
 
 def test_unknown_scenario_exits_with_2(capsys: Any) -> None:

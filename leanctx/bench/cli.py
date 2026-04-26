@@ -87,7 +87,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
                 "required_extras": list(info.required_extras),
                 "missing_extras": _missing_extras(info.required_extras),
                 "required_env": list(info.required_env),
-                "missing_env": [v for v in info.required_env if not os.environ.get(v)],
+                "missing_env": _missing_env(info.required_env),
             }
         )
 
@@ -129,7 +129,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         )
         return 3
 
-    missing_env = [v for v in info.required_env if not os.environ.get(v)]
+    missing_env = _missing_env(info.required_env)
     if missing_env:
         print(
             f"error: scenario {info.name!r} requires environment variable(s) "
@@ -181,6 +181,22 @@ def _missing_extras(required: Iterable[str]) -> list[str]:
     for name in required:
         if not _extra_installed(name):
             missing.append(name)
+    return missing
+
+
+def _missing_env(required: Iterable[str]) -> list[str]:
+    """Return the env-var groups not satisfied.
+
+    Each entry in ``required`` is either a single env var name (must be
+    set) or a pipe-separated list ``"A|B|C"`` meaning ANY-of (at least
+    one of the listed names must be set). Returns the entries that are
+    NOT satisfied; empty list = all satisfied.
+    """
+    missing: list[str] = []
+    for entry in required:
+        alternatives = entry.split("|")
+        if not any(os.environ.get(alt) for alt in alternatives):
+            missing.append(entry)
     return missing
 
 

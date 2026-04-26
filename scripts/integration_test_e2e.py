@@ -1,131 +1,45 @@
-"""End-to-end integration test: leanctx.Anthropic wrapper with real
-Lingua compression and a respx-mocked Anthropic API.
+"""End-to-end integration test: leanctx.Anthropic wrapper with respx-mocked
+Anthropic API.
 
-This is the full v0.1 pipeline exercised top to bottom:
+v0.3 compatibility wrapper: delegates to `leanctx bench run anthropic-e2e`
+in-process. To run via the new CLI directly:
 
-    leanctx.Anthropic
-        ↓
-    Middleware (mode=on, threshold, routing)
-        ↓
-    classify / route / compress
-        ↓
-    Lingua (real llmlingua + LLMLingua-2 model)
-        ↓
-    anthropic.Anthropic (real SDK)
-        ↓
-    httpx / respx (mocked at the socket boundary)
+    leanctx bench run anthropic-e2e --workload rag
 
-Requires: ``pip install 'leanctx[lingua,anthropic,bench]'``. Runs
-against the real LLMLingua-2 model (1.2 GB; downloads on first run,
-cached afterwards) with respx mocking the Anthropic endpoint so no
-API key is needed.
+Requires: ``pip install 'leanctx[anthropic,bench]'`` (and optionally
+[lingua] when middleware mode=on routes prose to Lingua, which the
+anthropic-e2e scenario does at threshold_tokens=100).
 """
 
 from __future__ import annotations
 
-import json
-import time
+import sys
 
-import respx
-from httpx import Response
-
-from leanctx import Anthropic
-
-LONG_PROSE = (
-    "Cloud-native architectures have become the dominant paradigm for deploying "
-    "modern applications. The shift from monolithic architectures to microservices "
-    "was driven by scalability, resilience, and independent deployment cycles. "
-    "Kubernetes adopters report improved productivity, faster time-to-market, and "
-    "better utilization. However, the transition demands investment in observability, "
-    "service meshes, and developer tooling to manage complexity. "
-) * 10
+from leanctx.bench import scenarios
 
 
-def _mock_response() -> dict:
-    return {
-        "id": "msg_01INTEGRATION",
-        "type": "message",
-        "role": "assistant",
-        "model": "claude-sonnet-4-6",
-        "content": [{"type": "text", "text": "ack"}],
-        "stop_reason": "end_turn",
-        "stop_sequence": None,
-        "usage": {
-            "input_tokens": 50,
-            "output_tokens": 2,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-        },
-    }
+def main() -> int:
+    info, runner = scenarios.get("anthropic-e2e")
+    record = runner(workload="rag")
 
+    print("=== leanctx bench run anthropic-e2e --workload rag ===")
+    print(f"  scenario:        {record.scenario}")
+    print(f"  status:          {record.status}")
+    print(f"  request:         {record.request_provider}/{record.request_model}")
+    print(f"  compressor:      {record.compressor}")
+    print(f"  input  tokens:   {record.input_tokens}")
+    print(f"  output tokens:   {record.output_tokens}")
+    print(f"  tokens saved:    {record.tokens_saved}")
+    print(f"  ratio:           {record.ratio:.1%}")
+    print(f"  cost_usd:        {record.cost_usd}")
+    print(f"  duration:        {record.duration_ms} ms")
 
-def main() -> None:
-    print("=== leanctx.Anthropic + real Lingua + mocked Anthropic API ===\n")
-    print("(First run downloads ~1.2 GB of LLMLingua-2 weights; cached afterwards.)\n")
-
-    # assert_all_called=False because the HuggingFace pass-through routes
-    # are only hit on first run; on cached runs they're unused and respx
-    # would otherwise flag that as a failure.
-    with respx.mock(
-        base_url="https://api.anthropic.com", assert_all_called=False
-    ) as mock:
-        route = mock.post("/v1/messages").mock(
-            return_value=Response(200, json=_mock_response())
-        )
-        # Let HuggingFace requests through to the real network so the
-        # LLMLingua-2 model can download / refresh tokenizer files.
-        mock.route(host__regex=r".*huggingface\.co").pass_through()
-        mock.route(host__regex=r".*hf\.co").pass_through()
-
-        client = Anthropic(
-            api_key="sk-test",
-            leanctx_config={
-                "mode": "on",
-                "trigger": {"threshold_tokens": 100},
-                "routing": {"prose": "lingua"},
-            },
-        )
-
-        print(f"Sending request with {len(LONG_PROSE)} chars of prose...")
-        t0 = time.monotonic()
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=10,
-            messages=[{"role": "user", "content": LONG_PROSE}],
-        )
-        elapsed = time.monotonic() - t0
-        print(f"  full request cycle: {elapsed:.2f}s\n")
-
-    # What actually reached the Anthropic endpoint?
-    sent_body = json.loads(route.calls[0].request.content)
-    sent_content = sent_body["messages"][0]["content"]
-
-    print("=== What we sent to api.anthropic.com ===")
-    print(f"  messages sent:    {len(sent_body['messages'])}")
-    print(f"  first msg chars:  {len(sent_content)}")
-    print(f"  original chars:   {len(LONG_PROSE)}")
-    print(f"  char reduction:   {1 - len(sent_content) / len(LONG_PROSE):.1%}\n")
-
-    print("=== Preview of compressed bytes that hit the wire ===")
-    print(sent_content[:500] + ("..." if len(sent_content) > 500 else ""))
-    print()
-
-    print("=== leanctx telemetry on response ===")
-    print(f"  leanctx_method:       {response.usage.leanctx_method}")
-    print(f"  leanctx_ratio:        {response.usage.leanctx_ratio:.1%}")
-    print(f"  leanctx_tokens_saved: {response.usage.leanctx_tokens_saved}")
-    print()
-
-    assert response.usage.leanctx_method == "lingua", (
-        f"expected method=lingua, got {response.usage.leanctx_method}"
-    )
-    assert len(sent_content) < len(LONG_PROSE), (
-        f"expected compression; sent {len(sent_content)} vs original {len(LONG_PROSE)}"
-    )
-    assert response.usage.leanctx_tokens_saved > 0, "expected positive token savings"
-
-    print("OK — v0.1 pipeline end-to-end works.")
+    if record.status != "success":
+        print(f"FAIL: {record.error}", file=sys.stderr)
+        return 1
+    print("\nOK — v0.3 pipeline end-to-end works.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

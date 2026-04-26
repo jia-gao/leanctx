@@ -65,25 +65,44 @@ def get(name: str) -> tuple[ScenarioInfo, Callable[..., BenchRecord]]:
 
 _LOADED = False
 
+# Import names of the runner modules whose @register decorators populate
+# the built-in registry. Listed here (rather than written as imports)
+# so reset_for_tests() can re-trigger registration via importlib.reload.
+_BUILTIN_RUNNER_MODULES = (
+    "leanctx.bench.runners.agent_structural",
+    "leanctx.bench.runners.anthropic_e2e",
+    "leanctx.bench.runners.lingua_local",
+    "leanctx.bench.runners.selfllm_provider",
+)
+
 
 def _ensure_loaded() -> None:
     global _LOADED
     if _LOADED:
         return
     _LOADED = True
-    # Import runner modules so their @register decorators fire. Each
-    # runner module is responsible for its own optional-import
-    # handling — the registry call should NOT import optional extras.
-    from leanctx.bench.runners import (  # noqa: F401
-        agent_structural,
-        anthropic_e2e,
-        lingua_local,
-        selfllm_provider,
-    )
+    import importlib  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    for modname in _BUILTIN_RUNNER_MODULES:
+        if modname in sys.modules:
+            # Already imported in this process — reload to re-fire
+            # @register decorators after a reset_for_tests() cycle.
+            importlib.reload(sys.modules[modname])
+        else:
+            importlib.import_module(modname)
 
 
 def reset_for_tests() -> None:
-    """Clear the registry — used by tests that register custom scenarios."""
+    """Clear the registry — used by tests that register custom scenarios.
+
+    After reset, the next call to a public function (`list_scenarios`,
+    `get`) will re-import the built-in runners so the canonical six
+    scenarios reappear. Tests that need a clean slate WITHOUT the
+    built-ins can register their own scenarios immediately after the
+    reset (the built-ins won't be loaded until a public accessor is
+    called).
+    """
     global _LOADED
     _REGISTRY.clear()
     _LOADED = False

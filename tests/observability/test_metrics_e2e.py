@@ -216,6 +216,81 @@ def test_direct_selfllm_parentage(spans: Any) -> None:
     assert roots[0].attributes["leanctx.method"] == "selfllm"
 
 
+@otel_required
+def test_direct_lingua_async_parentage(spans: Any) -> None:
+    """AC-6 row 3 async: direct `await Lingua.compress_async()` emits a
+    root compressor span with provider=none."""
+    import asyncio
+
+    class _DirectLingua:
+        name = "lingua"
+
+        def __init__(self, observability: ObservabilityConfig | None = None) -> None:
+            self.observability = observability or ObservabilityConfig()
+
+        async def compress_async(
+            self, messages: list[dict[str, Any]]
+        ) -> tuple[list[dict[str, Any]], CompressionStats]:
+            from leanctx.observability.compressor_hooks import compressor_span
+
+            with compressor_span(self.observability, name=self.name) as span:
+                stats = CompressionStats(
+                    input_tokens=100,
+                    output_tokens=50,
+                    ratio=0.5,
+                    method="lingua",
+                )
+                span.set_stats(stats)
+                return messages, stats
+
+    direct = _DirectLingua(observability=_obs())
+    asyncio.run(direct.compress_async([{"role": "user", "content": "x"}]))
+
+    finished = spans.get_finished_spans()
+    roots = [s for s in finished if s.name == "leanctx.compressor.compress"]
+    assert len(roots) == 1
+    assert roots[0].attributes["leanctx.provider"] == "none"
+    assert roots[0].attributes["leanctx.method"] == "lingua"
+
+
+@otel_required
+def test_direct_selfllm_async_parentage(spans: Any) -> None:
+    """AC-6 row 3 async: direct `await SelfLLM.compress_async()` emits a
+    root compressor span with provider=none."""
+    import asyncio
+
+    class _DirectSelfLLM:
+        name = "selfllm"
+
+        def __init__(self, observability: ObservabilityConfig | None = None) -> None:
+            self.observability = observability or ObservabilityConfig()
+
+        async def compress_async(
+            self, messages: list[dict[str, Any]]
+        ) -> tuple[list[dict[str, Any]], CompressionStats]:
+            from leanctx.observability.compressor_hooks import compressor_span
+
+            with compressor_span(self.observability, name=self.name) as span:
+                stats = CompressionStats(
+                    input_tokens=100,
+                    output_tokens=30,
+                    ratio=0.3,
+                    method="selfllm",
+                    cost_usd=0.0042,
+                )
+                span.set_stats(stats)
+                return messages, stats
+
+    direct = _DirectSelfLLM(observability=_obs())
+    asyncio.run(direct.compress_async([{"role": "user", "content": "x"}]))
+
+    finished = spans.get_finished_spans()
+    roots = [s for s in finished if s.name == "leanctx.compressor.compress"]
+    assert len(roots) == 1
+    assert roots[0].attributes["leanctx.provider"] == "none"
+    assert roots[0].attributes["leanctx.method"] == "selfllm"
+
+
 def _read_cost_total(metric_reader: Any) -> float:
     return _read_counter_total(metric_reader, "leanctx.compress.cost_usd")
 

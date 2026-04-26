@@ -162,6 +162,8 @@ leanctx span and metric attributes are bounded:
 - `status` ∈ `{success, error}`
 - `extra_attributes` from your config — keep these stable and bounded
 
+On error, leanctx records `leanctx.error=true` and `error.type=<exception class name>` (a bounded set of class names) plus an OTel span status of `ERROR` with `description=<exception class name>`. leanctx **does not** record the raw exception message as a span attribute — exception strings can be unbounded and may contain user-originated content (PII, request IDs, fragments of user data). If you need exception details, attach a span event in your application code with whatever fields your privacy posture allows.
+
 Per-tenant attribution (e.g. a `tenant_id` attribute) is **out of scope for v0.3**. It requires a request-context mechanism plus an explicit cardinality cap, which is planned for v0.4.
 
 ## Backward compatibility

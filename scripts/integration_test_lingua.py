@@ -1,74 +1,44 @@
 """Local integration test for the Lingua compressor.
 
-Requires: ``pip install 'leanctx[lingua]'`` — pulls torch, transformers,
-llmlingua. First run downloads ~1.2 GB of model weights to
-``~/.cache/huggingface/``.
+v0.3 compatibility wrapper: delegates to `leanctx bench run lingua-local`
+in-process so the legacy invocation continues to work but the actual
+logic lives in the bench scenario. To run via the new CLI directly:
 
-Run with:
+    leanctx bench run lingua-local --workload rag
 
-    .venv/bin/python scripts/integration_test_lingua.py
+Requires: ``pip install 'leanctx[lingua]'``.
 """
 
 from __future__ import annotations
 
-import time
+import sys
 
-from leanctx import Lingua
-
-SAMPLE_DOC = """
-Cloud-native architectures have become the dominant paradigm for deploying
-modern applications. The shift from monolithic architectures to microservices
-was driven by the need for scalability, resilience, and independent deployment
-cycles. Organizations adopting Kubernetes as their container orchestration
-platform report increased developer productivity, faster time to market, and
-improved infrastructure utilization. However, the transition is not without
-challenges — teams must invest in observability, service mesh technologies,
-and developer tooling to manage the growing complexity.
-
-Distributed tracing provides visibility into request flows across services,
-helping teams debug issues that span multiple components. Metrics collection
-via Prometheus and visualization via Grafana have become standard practice
-across the industry. Log aggregation through the ELK stack or Loki rounds
-out the observability picture. For teams running LLM workloads on Kubernetes,
-additional specialized tooling is required: GPU scheduling, model serving
-frameworks like vLLM or SGLang, and inference gateways that handle caching,
-routing, and cost attribution across multiple tenants.
-""".strip() * 3
+from leanctx.bench import scenarios
 
 
-def main() -> None:
-    print("Constructing Lingua (model load on first use)...")
-    t0 = time.monotonic()
-    lingua = Lingua(ratio=0.5)
-    lingua._load()
-    load_time = time.monotonic() - t0
-    print(f"  model loaded in {load_time:.1f}s")
+def main() -> int:
+    info, runner = scenarios.get("lingua-local")
+    record = runner(workload="rag")
 
-    print("\nCompressing sample document...")
-    t0 = time.monotonic()
-    messages = [{"role": "user", "content": SAMPLE_DOC}]
-    compressed, stats = lingua.compress(messages)
-    elapsed = time.monotonic() - t0
-    print(f"  compressed in {elapsed:.2f}s")
+    print("=== leanctx bench run lingua-local --workload rag ===")
+    print(f"  scenario:      {record.scenario}")
+    print(f"  workload:      {record.workload}")
+    print(f"  status:        {record.status}")
+    print(f"  method:        {record.compressor}")
+    print(f"  input  tokens: {record.input_tokens}")
+    print(f"  output tokens: {record.output_tokens}")
+    print(f"  ratio:         {record.ratio:.1%}")
+    print(f"  tokens saved:  {record.tokens_saved}")
+    print(f"  duration:      {record.duration_ms} ms")
+    if record.lingua_model_revision:
+        print(f"  lingua model:  {record.lingua_model_revision}")
 
-    print("\n=== Results ===")
-    print(f"  method:        {stats.method}")
-    print(f"  input  tokens: {stats.input_tokens}")
-    print(f"  output tokens: {stats.output_tokens}")
-    print(f"  ratio:         {stats.ratio:.1%}")
-    print(f"  saved:         {stats.input_tokens - stats.output_tokens} tokens")
-
-    print("\n=== Input (first 400 chars) ===")
-    print(messages[0]["content"][:400] + ("..." if len(messages[0]["content"]) > 400 else ""))
-    print("\n=== Compressed output (first 400 chars) ===")
-    print(compressed[0]["content"][:400] + ("..." if len(compressed[0]["content"]) > 400 else ""))
-
-    assert stats.input_tokens > stats.output_tokens, (
-        f"expected compression; got input={stats.input_tokens}, output={stats.output_tokens}"
-    )
-    assert stats.ratio < 1.0, f"expected ratio < 1; got {stats.ratio}"
+    if record.status != "success":
+        print(f"FAIL: {record.error}", file=sys.stderr)
+        return 1
     print("\nOK")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
