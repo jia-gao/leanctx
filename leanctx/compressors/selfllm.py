@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from leanctx._content import get_text_content
+from leanctx.observability.compressor_hooks import compressor_span
+from leanctx.observability.config import ObservabilityConfig
 from leanctx.stats import CompressionStats
 
 _ANTHROPIC_INSTALL_HINT = (
@@ -122,6 +124,7 @@ class SelfLLM:
         api_key: str | None = None,
         ratio: float = 0.3,
         max_summary_tokens: int = 500,
+        observability: ObservabilityConfig | None = None,
     ) -> None:
         if provider not in _SUPPORTED_PROVIDERS:
             raise ValueError(
@@ -137,12 +140,21 @@ class SelfLLM:
         self.ratio = ratio
         self.max_summary_tokens = max_summary_tokens
         self._client: Any = None
+        self.observability = observability or ObservabilityConfig()
 
     # ----------------------------------------------------------------- #
     # Compressor protocol
     # ----------------------------------------------------------------- #
 
     def compress(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], CompressionStats]:
+        with compressor_span(self.observability, name=self.name) as span:
+            result = self._compress_inner(messages)
+            span.set_stats(result[1])
+            return result
+
+    def _compress_inner(
         self, messages: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], CompressionStats]:
         if not messages:
@@ -172,9 +184,12 @@ class SelfLLM:
         self, messages: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], CompressionStats]:
         # v0.2 still uses the sync SDK under the hood. Offload so callers
-        # in an event loop don't block. v0.3 will wire async provider
-        # clients for true non-blocking compression calls.
-        return await asyncio.to_thread(self.compress, messages)
+        # in an event loop don't block. The span lives in the calling
+        # context so the depth counter behaves correctly.
+        with compressor_span(self.observability, name=self.name) as span:
+            result = await asyncio.to_thread(self._compress_inner, messages)
+            span.set_stats(result[1])
+            return result
 
     # ----------------------------------------------------------------- #
     # Provider dispatch

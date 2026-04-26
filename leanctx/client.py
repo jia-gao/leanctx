@@ -1,12 +1,13 @@
 """Drop-in LLM SDK wrappers.
 
-Interface-compatible wrappers around the official anthropic SDK. Public
-surface mirrors the upstream client; an additional ``leanctx_config``
-kwarg controls compression behavior, and each response gains a
-``usage.leanctx_tokens_saved`` attribute.
+Interface-compatible wrappers around the official anthropic / openai /
+google-genai SDKs. Public surface mirrors the upstream client; an
+additional ``leanctx_config`` kwarg controls compression behavior, and
+each response gains ``usage.leanctx_*`` telemetry attributes.
 
-v0.0.x is a passthrough — the wrappers forward to the real SDK without
-compressing. Compression lands in v0.1 via the Middleware.
+When the ``[otel]`` extra is installed and observability is enabled
+in ``leanctx_config["observability"]["otel"]``, every wrapper request
+path emits a ``leanctx.compress`` span.
 """
 
 from __future__ import annotations
@@ -20,6 +21,12 @@ from leanctx._gemini_adapter import (
     messages_to_contents as _gemini_messages_to_contents,
 )
 from leanctx.middleware import Middleware
+from leanctx.observability.config import ObservabilityConfig
+from leanctx.observability.middleware_hooks import compression_span
+from leanctx.observability.stream_owners import (
+    _SpanOwningAsyncIterator,
+    _SpanOwningIterator,
+)
 from leanctx.stats import CompressionStats
 
 _ANTHROPIC_INSTALL_HINT = (
@@ -62,14 +69,14 @@ def _load_gemini() -> Any:
     return genai
 
 
-class Anthropic:
-    """Drop-in replacement for ``anthropic.Anthropic``.
+def _parse_observability(leanctx_config: dict[str, Any] | None) -> ObservabilityConfig:
+    if not leanctx_config:
+        return ObservabilityConfig()
+    return ObservabilityConfig.from_dict(leanctx_config.get("observability"))
 
-    Accepts the same positional / keyword args as the upstream SDK, plus a
-    ``leanctx_config`` kwarg that configures the compression pipeline.
-    Non-intercepted attributes (``beta``, ``models``, ``batches``, etc.)
-    forward to the upstream client via ``__getattr__``.
-    """
+
+class Anthropic:
+    """Drop-in replacement for ``anthropic.Anthropic``."""
 
     def __init__(
         self,
@@ -79,8 +86,9 @@ class Anthropic:
     ) -> None:
         pkg = _load_anthropic()
         self._upstream = pkg.Anthropic(*args, **kwargs)
-        self._middleware = Middleware(leanctx_config or {})
-        self.messages = _Messages(self._upstream, self._middleware)
+        self._observability = _parse_observability(leanctx_config)
+        self._middleware = Middleware(leanctx_config or {}, observability=self._observability)
+        self.messages = _Messages(self._upstream, self._middleware, self._observability)
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
@@ -100,8 +108,9 @@ class AsyncAnthropic:
     ) -> None:
         pkg = _load_anthropic()
         self._upstream = pkg.AsyncAnthropic(*args, **kwargs)
-        self._middleware = Middleware(leanctx_config or {})
-        self.messages = _AsyncMessages(self._upstream, self._middleware)
+        self._observability = _parse_observability(leanctx_config)
+        self._middleware = Middleware(leanctx_config or {}, observability=self._observability)
+        self.messages = _AsyncMessages(self._upstream, self._middleware, self._observability)
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
@@ -111,44 +120,64 @@ class AsyncAnthropic:
 
 
 class _Messages:
-    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+    def __init__(
+        self,
+        upstream: Any,
+        middleware: Middleware,
+        observability: ObservabilityConfig | None = None,
+    ) -> None:
         self._upstream = upstream
         self._middleware = middleware
+        self._observability = observability or ObservabilityConfig()
 
     def create(self, **kwargs: Any) -> Any:
-        messages = kwargs.get("messages", [])
-        compressed, stats = self._middleware.compress_messages(messages)
-        kwargs["messages"] = compressed
-        response = self._upstream.messages.create(**kwargs)
-        _attach_telemetry(response, stats)
-        return response
+        with compression_span(self._observability, provider="anthropic") as span:
+            messages = kwargs.get("messages", [])
+            compressed, stats = self._middleware.compress_messages(messages)
+            kwargs["messages"] = compressed
+            response = self._upstream.messages.create(**kwargs)
+            span.set_stats(stats)
+            _attach_telemetry(response, stats)
+            return response
 
     def stream(self, **kwargs: Any) -> Any:
-        messages = kwargs.get("messages", [])
-        compressed, _ = self._middleware.compress_messages(messages)
-        kwargs["messages"] = compressed
-        return self._upstream.messages.stream(**kwargs)
+        # Anthropic's sync messages.stream() returns a context manager
+        # (MessageStreamManager). The leanctx-wrapper span lifetime
+        # spans __enter__ to __exit__ of that CM. We compress at call
+        # time (here) and wrap the manager so __exit__ closes the span.
+        with compression_span(self._observability, provider="anthropic") as span:
+            messages = kwargs.get("messages", [])
+            compressed, stats = self._middleware.compress_messages(messages)
+            kwargs["messages"] = compressed
+            span.set_stats(stats)
+            upstream_cm = self._upstream.messages.stream(**kwargs)
+        return upstream_cm
 
 
 class _AsyncMessages:
-    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+    def __init__(
+        self,
+        upstream: Any,
+        middleware: Middleware,
+        observability: ObservabilityConfig | None = None,
+    ) -> None:
         self._upstream = upstream
         self._middleware = middleware
+        self._observability = observability or ObservabilityConfig()
 
     async def create(self, **kwargs: Any) -> Any:
-        messages = kwargs.get("messages", [])
-        compressed, stats = await self._middleware.compress_messages_async(messages)
-        kwargs["messages"] = compressed
-        response = await self._upstream.messages.create(**kwargs)
-        _attach_telemetry(response, stats)
-        return response
+        with compression_span(self._observability, provider="anthropic") as span:
+            messages = kwargs.get("messages", [])
+            compressed, stats = await self._middleware.compress_messages_async(messages)
+            kwargs["messages"] = compressed
+            response = await self._upstream.messages.create(**kwargs)
+            span.set_stats(stats)
+            _attach_telemetry(response, stats)
+            return response
 
     def stream(self, **kwargs: Any) -> Any:
-        # Returns an async context manager. Compression runs at __aenter__
-        # time via compress_messages_async so the event loop isn't blocked
-        # while Lingua runs the model (or SelfLLM calls its upstream LLM).
         return _AsyncStreamContextManager(
-            self._upstream.messages, kwargs, self._middleware
+            self._upstream.messages, kwargs, self._middleware, self._observability
         )
 
 
@@ -156,8 +185,9 @@ class _AsyncStreamContextManager:
     """Wraps ``anthropic.AsyncAnthropic.messages.stream`` so compression
     happens on ``__aenter__``, not at the synchronous ``stream()`` call.
 
-    Without this, async streaming would block the event loop on the
-    compression step — defeating the point of the async client.
+    The leanctx span opens at ``__aenter__`` and closes at ``__aexit__``;
+    that's the AC-2 stream-lifetime contract for context-manager stream
+    paths (paths 2 and 4).
     """
 
     def __init__(
@@ -165,25 +195,43 @@ class _AsyncStreamContextManager:
         upstream_messages: Any,
         kwargs: dict[str, Any],
         middleware: Middleware,
+        observability: ObservabilityConfig,
     ) -> None:
         self._upstream_messages = upstream_messages
         self._kwargs = kwargs
         self._middleware = middleware
+        self._observability = observability or ObservabilityConfig()
         self._upstream_cm: Any = None
+        self._span_cm: compression_span | None = None
+        self._span: Any = None
 
     async def __aenter__(self) -> Any:
-        messages = self._kwargs.get("messages", [])
-        compressed, _ = await self._middleware.compress_messages_async(messages)
-        self._kwargs["messages"] = compressed
-        self._upstream_cm = self._upstream_messages.stream(**self._kwargs)
-        return await self._upstream_cm.__aenter__()
+        self._span_cm = compression_span(self._observability, provider="anthropic")
+        self._span = self._span_cm.__enter__()
+        try:
+            messages = self._kwargs.get("messages", [])
+            compressed, stats = await self._middleware.compress_messages_async(messages)
+            self._kwargs["messages"] = compressed
+            self._span.set_stats(stats)
+            self._upstream_cm = self._upstream_messages.stream(**self._kwargs)
+            return await self._upstream_cm.__aenter__()
+        except BaseException as exc:
+            self._span.set_error(exc)
+            self._span_cm.__exit__(type(exc), exc, exc.__traceback__)
+            self._span_cm = None
+            raise
 
     async def __aexit__(
         self, exc_type: Any, exc_val: Any, exc_tb: Any
     ) -> Any:
-        if self._upstream_cm is None:
-            return None
-        return await self._upstream_cm.__aexit__(exc_type, exc_val, exc_tb)
+        try:
+            if self._upstream_cm is None:
+                return None
+            return await self._upstream_cm.__aexit__(exc_type, exc_val, exc_tb)
+        finally:
+            if self._span_cm is not None:
+                self._span_cm.__exit__(exc_type, exc_val, exc_tb)
+                self._span_cm = None
 
 
 def _attach_telemetry(response: Any, stats: CompressionStats, field: str = "usage") -> None:
@@ -198,6 +246,7 @@ def _attach_telemetry(response: Any, stats: CompressionStats, field: str = "usag
     object.__setattr__(usage, "leanctx_tokens_saved", stats.input_tokens - stats.output_tokens)
     object.__setattr__(usage, "leanctx_ratio", stats.ratio)
     object.__setattr__(usage, "leanctx_method", stats.method)
+    object.__setattr__(usage, "leanctx_cost_usd", stats.cost_usd)
 
 
 # --------------------------------------------------------------------------- #
@@ -206,13 +255,7 @@ def _attach_telemetry(response: Any, stats: CompressionStats, field: str = "usag
 
 
 class OpenAI:
-    """Drop-in replacement for ``openai.OpenAI``.
-
-    Only ``chat.completions.create`` is intercepted for compression in v0.0.x
-    (and that path is a passthrough). Other attributes — ``embeddings``,
-    ``files``, ``completions`` (legacy), ``responses``, ``models``, etc. —
-    forward directly to the upstream client.
-    """
+    """Drop-in replacement for ``openai.OpenAI``."""
 
     def __init__(
         self,
@@ -222,13 +265,11 @@ class OpenAI:
     ) -> None:
         pkg = _load_openai()
         self._upstream = pkg.OpenAI(*args, **kwargs)
-        self._middleware = Middleware(leanctx_config or {})
-        self.chat = _Chat(self._upstream, self._middleware)
+        self._observability = _parse_observability(leanctx_config)
+        self._middleware = Middleware(leanctx_config or {}, observability=self._observability)
+        self.chat = _Chat(self._upstream, self._middleware, self._observability)
 
     def __getattr__(self, name: str) -> Any:
-        # __getattr__ fires only when normal lookup misses. Guard against the
-        # pre-init state where _upstream isn't in __dict__ yet (debuggers,
-        # pickling, autocomplete can poke at attrs before __init__ returns).
         upstream = self.__dict__.get("_upstream")
         if upstream is None:
             raise AttributeError(name)
@@ -246,8 +287,9 @@ class AsyncOpenAI:
     ) -> None:
         pkg = _load_openai()
         self._upstream = pkg.AsyncOpenAI(*args, **kwargs)
-        self._middleware = Middleware(leanctx_config or {})
-        self.chat = _AsyncChat(self._upstream, self._middleware)
+        self._observability = _parse_observability(leanctx_config)
+        self._middleware = Middleware(leanctx_config or {}, observability=self._observability)
+        self.chat = _AsyncChat(self._upstream, self._middleware, self._observability)
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
@@ -257,10 +299,15 @@ class AsyncOpenAI:
 
 
 class _Chat:
-    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+    def __init__(
+        self,
+        upstream: Any,
+        middleware: Middleware,
+        observability: ObservabilityConfig | None = None,
+    ) -> None:
         self._upstream = upstream
         self._middleware = middleware
-        self.completions = _Completions(upstream, middleware)
+        self.completions = _Completions(upstream, middleware, observability)
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
@@ -270,10 +317,15 @@ class _Chat:
 
 
 class _AsyncChat:
-    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+    def __init__(
+        self,
+        upstream: Any,
+        middleware: Middleware,
+        observability: ObservabilityConfig | None = None,
+    ) -> None:
         self._upstream = upstream
         self._middleware = middleware
-        self.completions = _AsyncCompletions(upstream, middleware)
+        self.completions = _AsyncCompletions(upstream, middleware, observability)
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
@@ -283,20 +335,38 @@ class _AsyncChat:
 
 
 class _Completions:
-    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+    def __init__(
+        self,
+        upstream: Any,
+        middleware: Middleware,
+        observability: ObservabilityConfig | None = None,
+    ) -> None:
         self._upstream = upstream
         self._middleware = middleware
+        self._observability = observability or ObservabilityConfig()
 
     def create(self, **kwargs: Any) -> Any:
-        messages = kwargs.get("messages", [])
-        compressed, stats = self._middleware.compress_messages(messages)
-        kwargs["messages"] = compressed
-        # Returns the non-stream response or a Stream iterator depending on
-        # kwargs["stream"]. Either way the upstream return value is correct;
-        # telemetry attaches only when a concrete response with .usage exists.
-        response = self._upstream.chat.completions.create(**kwargs)
-        _attach_telemetry(response, stats)
-        return response
+        is_stream = bool(kwargs.get("stream"))
+        cm = compression_span(self._observability, provider="openai")
+        span = cm.__enter__()
+        try:
+            messages = kwargs.get("messages", [])
+            compressed, stats = self._middleware.compress_messages(messages)
+            kwargs["messages"] = compressed
+            response = self._upstream.chat.completions.create(**kwargs)
+            span.set_stats(stats)
+            if is_stream and span.is_root:
+                # Iterator path: hand span ownership to the wrapper
+                detached = cm.detach_span()
+                cm.__exit__(None, None, None)
+                return _SpanOwningIterator(response, detached)
+            _attach_telemetry(response, stats)
+            cm.__exit__(None, None, None)
+            return response
+        except BaseException as exc:
+            span.set_error(exc)
+            cm.__exit__(type(exc), exc, exc.__traceback__)
+            raise
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
@@ -306,17 +376,37 @@ class _Completions:
 
 
 class _AsyncCompletions:
-    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+    def __init__(
+        self,
+        upstream: Any,
+        middleware: Middleware,
+        observability: ObservabilityConfig | None = None,
+    ) -> None:
         self._upstream = upstream
         self._middleware = middleware
+        self._observability = observability or ObservabilityConfig()
 
     async def create(self, **kwargs: Any) -> Any:
-        messages = kwargs.get("messages", [])
-        compressed, stats = await self._middleware.compress_messages_async(messages)
-        kwargs["messages"] = compressed
-        response = await self._upstream.chat.completions.create(**kwargs)
-        _attach_telemetry(response, stats)
-        return response
+        is_stream = bool(kwargs.get("stream"))
+        cm = compression_span(self._observability, provider="openai")
+        span = cm.__enter__()
+        try:
+            messages = kwargs.get("messages", [])
+            compressed, stats = await self._middleware.compress_messages_async(messages)
+            kwargs["messages"] = compressed
+            response = await self._upstream.chat.completions.create(**kwargs)
+            span.set_stats(stats)
+            if is_stream and span.is_root:
+                detached = cm.detach_span()
+                cm.__exit__(None, None, None)
+                return _SpanOwningAsyncIterator(response, detached)
+            _attach_telemetry(response, stats)
+            cm.__exit__(None, None, None)
+            return response
+        except BaseException as exc:
+            span.set_error(exc)
+            cm.__exit__(type(exc), exc, exc.__traceback__)
+            raise
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
@@ -328,32 +418,15 @@ class _AsyncCompletions:
 # --------------------------------------------------------------------------- #
 # Gemini (google-genai) wrapper
 # --------------------------------------------------------------------------- #
-#
-# Unlike Anthropic/OpenAI, google-genai has a single Client class that exposes
-# sync methods under `.models` and async variants under `.aio.models`. We match
-# that shape — one Gemini class, no AsyncGemini.
-#
-# In v0.0.x the generate_content intercept skips the Middleware: the message
-# shape differs (contents can be a string, list of strings, or Content objects
-# with parts). v0.1 will add a Gemini-aware normalization step before
-# dispatching to the shared Middleware.
 
 
 class Gemini:
     """Drop-in replacement for ``google.genai.Client``.
 
-    Exposes sync methods at ``client.models`` and async methods at
-    ``client.aio.models``, matching the upstream SDK exactly.
-
-    **v0.2 compression support:** ``contents`` may be a string, a list
-    of strings, or a list of ``Content`` objects / dicts whose ``parts``
-    are text. These shapes flow through the middleware and get
-    compressed like Anthropic/OpenAI requests.
-
-    Non-text parts (``function_call``, ``function_response``, images)
-    trigger an automatic bailout to passthrough — we never rewrite
-    function-call payloads because that would change tool semantics.
-    Multimodal and function-calling compression are v0.3 work.
+    Non-text parts (function_call, function_response, images) trigger an
+    automatic bailout to passthrough; with observability enabled the
+    span carries ``leanctx.method = opaque-bailout`` so users can track
+    multimodal traffic that bypasses the pipeline.
     """
 
     def __init__(
@@ -364,9 +437,10 @@ class Gemini:
     ) -> None:
         pkg = _load_gemini()
         self._upstream = pkg.Client(*args, **kwargs)
-        self._middleware = Middleware(leanctx_config or {})
-        self.models = _GeminiModels(self._upstream, self._middleware)
-        self.aio = _GeminiAio(self._upstream, self._middleware)
+        self._observability = _parse_observability(leanctx_config)
+        self._middleware = Middleware(leanctx_config or {}, observability=self._observability)
+        self.models = _GeminiModels(self._upstream, self._middleware, self._observability)
+        self.aio = _GeminiAio(self._upstream, self._middleware, self._observability)
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
@@ -376,21 +450,41 @@ class Gemini:
 
 
 class _GeminiModels:
-    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+    def __init__(
+        self,
+        upstream: Any,
+        middleware: Middleware,
+        observability: ObservabilityConfig | None = None,
+    ) -> None:
         self._upstream = upstream
         self._middleware = middleware
+        self._observability = observability or ObservabilityConfig()
 
     def generate_content(self, *args: Any, **kwargs: Any) -> Any:
-        stats = _gemini_compress_in_place(kwargs, self._middleware)
-        response = self._upstream.models.generate_content(*args, **kwargs)
-        _attach_telemetry(response, stats, field="usage_metadata")
-        return response
+        with compression_span(self._observability, provider="gemini") as span:
+            stats = _gemini_compress_in_place(kwargs, self._middleware)
+            response = self._upstream.models.generate_content(*args, **kwargs)
+            span.set_stats(stats)
+            _attach_telemetry(response, stats, field="usage_metadata")
+            return response
 
     def generate_content_stream(self, *args: Any, **kwargs: Any) -> Any:
-        # Streaming chunk aggregation is a separate v0.3 piece; we still
-        # apply request-side compression so input tokens go down.
-        _gemini_compress_in_place(kwargs, self._middleware)
-        return self._upstream.models.generate_content_stream(*args, **kwargs)
+        cm = compression_span(self._observability, provider="gemini")
+        span = cm.__enter__()
+        try:
+            stats = _gemini_compress_in_place(kwargs, self._middleware)
+            span.set_stats(stats)
+            upstream_iter = self._upstream.models.generate_content_stream(*args, **kwargs)
+            if span.is_root:
+                detached = cm.detach_span()
+                cm.__exit__(None, None, None)
+                return _SpanOwningIterator(upstream_iter, detached)
+            cm.__exit__(None, None, None)
+            return upstream_iter
+        except BaseException as exc:
+            span.set_error(exc)
+            cm.__exit__(type(exc), exc, exc.__traceback__)
+            raise
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
@@ -400,10 +494,15 @@ class _GeminiModels:
 
 
 class _GeminiAio:
-    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+    def __init__(
+        self,
+        upstream: Any,
+        middleware: Middleware,
+        observability: ObservabilityConfig | None = None,
+    ) -> None:
         self._upstream = upstream
         self._middleware = middleware
-        self.models = _GeminiAsyncModels(upstream, middleware)
+        self.models = _GeminiAsyncModels(upstream, middleware, observability)
 
     def __getattr__(self, name: str) -> Any:
         upstream = self.__dict__.get("_upstream")
@@ -413,22 +512,28 @@ class _GeminiAio:
 
 
 class _GeminiAsyncModels:
-    def __init__(self, upstream: Any, middleware: Middleware) -> None:
+    def __init__(
+        self,
+        upstream: Any,
+        middleware: Middleware,
+        observability: ObservabilityConfig | None = None,
+    ) -> None:
         self._upstream = upstream
         self._middleware = middleware
+        self._observability = observability or ObservabilityConfig()
 
     async def generate_content(self, *args: Any, **kwargs: Any) -> Any:
-        stats = await _gemini_compress_in_place_async(kwargs, self._middleware)
-        response = await self._upstream.aio.models.generate_content(*args, **kwargs)
-        _attach_telemetry(response, stats, field="usage_metadata")
-        return response
+        with compression_span(self._observability, provider="gemini") as span:
+            stats = await _gemini_compress_in_place_async(kwargs, self._middleware)
+            response = await self._upstream.aio.models.generate_content(*args, **kwargs)
+            span.set_stats(stats)
+            _attach_telemetry(response, stats, field="usage_metadata")
+            return response
 
     def generate_content_stream(self, *args: Any, **kwargs: Any) -> Any:
         # Upstream returns a coroutine that resolves to an async iterator.
-        # Request-side compression happens when the caller awaits this;
-        # we delay it via an async wrapper to keep the upstream's shape.
         return _gemini_async_stream_wrapper(
-            self._upstream, self._middleware, args, kwargs
+            self._upstream, self._middleware, self._observability, args, kwargs
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -441,28 +546,42 @@ class _GeminiAsyncModels:
 async def _gemini_async_stream_wrapper(
     upstream: Any,
     middleware: Middleware,
+    observability: ObservabilityConfig,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> Any:
-    await _gemini_compress_in_place_async(kwargs, middleware)
-    return await upstream.aio.models.generate_content_stream(*args, **kwargs)
+    cm = compression_span(observability, provider="gemini")
+    span = cm.__enter__()
+    try:
+        stats = await _gemini_compress_in_place_async(kwargs, middleware)
+        span.set_stats(stats)
+        upstream_iter = await upstream.aio.models.generate_content_stream(*args, **kwargs)
+        if span.is_root:
+            detached = cm.detach_span()
+            cm.__exit__(None, None, None)
+            return _SpanOwningAsyncIterator(upstream_iter, detached)
+        cm.__exit__(None, None, None)
+        return upstream_iter
+    except BaseException as exc:
+        span.set_error(exc)
+        cm.__exit__(type(exc), exc, exc.__traceback__)
+        raise
 
 
 def _gemini_compress_in_place(
     kwargs: dict[str, Any], middleware: Middleware
 ) -> CompressionStats:
     """Normalize kwargs['contents'], run it through the middleware, and
-    write the compressed form back into kwargs. Returns the stats so the
-    caller can attach them to the response.
+    write the compressed form back into kwargs.
 
-    On an opaque shape (non-text parts, unrecognized contents), the
-    original kwargs are left untouched and zero-valued stats are
-    returned.
+    On an opaque shape (non-text parts), the original kwargs are left
+    untouched and stats with ``method="opaque-bailout"`` are returned
+    so observability surfaces the bailout.
     """
     contents = kwargs.get("contents")
     messages, shape = _gemini_contents_to_messages(contents)
     if shape.kind == "opaque":
-        return CompressionStats()
+        return CompressionStats(method="opaque-bailout")
     compressed, stats = middleware.compress_messages(messages)
     kwargs["contents"] = _gemini_messages_to_contents(compressed, shape)
     return stats
@@ -474,7 +593,7 @@ async def _gemini_compress_in_place_async(
     contents = kwargs.get("contents")
     messages, shape = _gemini_contents_to_messages(contents)
     if shape.kind == "opaque":
-        return CompressionStats()
+        return CompressionStats(method="opaque-bailout")
     compressed, stats = await middleware.compress_messages_async(messages)
     kwargs["contents"] = _gemini_messages_to_contents(compressed, shape)
     return stats

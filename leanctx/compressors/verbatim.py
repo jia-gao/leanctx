@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from leanctx.observability.compressor_hooks import compressor_span
+from leanctx.observability.config import ObservabilityConfig
 from leanctx.stats import CompressionStats
 from leanctx.tokens import count_message_tokens
 
@@ -21,16 +23,25 @@ class Verbatim:
 
     name = "verbatim"
 
+    def __init__(
+        self,
+        observability: ObservabilityConfig | None = None,
+    ) -> None:
+        self.observability = observability or ObservabilityConfig()
+
     def compress(
         self, messages: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], CompressionStats]:
-        tokens = count_message_tokens(messages)
-        return messages, CompressionStats(
-            input_tokens=tokens,
-            output_tokens=tokens,
-            ratio=1.0,
-            method="verbatim",
-        )
+        with compressor_span(self.observability, name=self.name) as span:
+            tokens = count_message_tokens(messages)
+            stats = CompressionStats(
+                input_tokens=tokens,
+                output_tokens=tokens,
+                ratio=1.0,
+                method="verbatim",
+            )
+            span.set_stats(stats)
+            return messages, stats
 
     async def compress_async(
         self, messages: list[dict[str, Any]]

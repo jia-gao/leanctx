@@ -10,12 +10,13 @@ whether to compress, and runs the pipeline:
          b. classify() to pick a ContentType
          c. Router picks a Compressor
          d. Compressor.compress([msg]) returns compressed form
-    4. Aggregate stats and return
+    4. Aggregate stats (including ``cost_usd``) and return.
 
-In v0.0.x the only Compressor implementation is :class:`Verbatim`, so
-even with ``mode: "on"`` the messages come through unchanged — but
-through the real pipeline, with real stats. v0.1 plugs Lingua / SelfLLM
-in via config without touching this file.
+When observability is enabled, every direct call to
+``compress_messages`` opens a ``leanctx.compress`` span. When called
+from a wrapper that has already opened its own span, the depth-counter
+makes this call a passthrough — stats still flow up to the wrapper's
+outermost span.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ from typing import Any
 
 from leanctx.classifier import classify
 from leanctx.compressors import Compressor, ContentType, Lingua, SelfLLM, Verbatim
+from leanctx.observability.config import ObservabilityConfig
+from leanctx.observability.middleware_hooks import compression_span
 from leanctx.router import Router
 from leanctx.stats import CompressionStats
 from leanctx.strategies import DedupStrategy, PurgeErrorsStrategy, Strategy
@@ -39,21 +42,22 @@ _DEFAULT_THRESHOLD_TOKENS = 2000
 
 # Factories for Compressor names that appear in routing config. Each
 # factory accepts a per-compressor config dict (e.g. config["lingua"])
-# and returns an instance. Missing keys fall back to each compressor's
-# own defaults.
-_COMPRESSOR_FACTORIES: dict[str, Callable[[dict[str, Any]], Compressor]] = {
-    "verbatim": lambda _cfg: Verbatim(),
-    "lingua": lambda cfg: Lingua(
+# and an ObservabilityConfig, and returns an instance.
+_COMPRESSOR_FACTORIES: dict[str, Callable[[dict[str, Any], ObservabilityConfig], Compressor]] = {
+    "verbatim": lambda _cfg, obs: Verbatim(observability=obs),
+    "lingua": lambda cfg, obs: Lingua(
         model=cfg.get("model", "microsoft/llmlingua-2-xlm-roberta-large-meetingbank"),
         ratio=cfg.get("ratio", 0.5),
         device=cfg.get("device"),
+        observability=obs,
     ),
-    "selfllm": lambda cfg: SelfLLM(
+    "selfllm": lambda cfg, obs: SelfLLM(
         provider=cfg.get("provider", "anthropic"),
         model=cfg.get("model", "claude-haiku-4-5"),
         api_key=cfg.get("api_key"),
         ratio=cfg.get("ratio", 0.3),
         max_summary_tokens=cfg.get("max_summary_tokens", 500),
+        observability=obs,
     ),
 }
 
@@ -61,8 +65,16 @@ _COMPRESSOR_FACTORIES: dict[str, Callable[[dict[str, Any]], Compressor]] = {
 class Middleware:
     """Orchestrates compression across a single SDK call."""
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        *,
+        observability: ObservabilityConfig | None = None,
+    ) -> None:
         self.config = config
+        self._observability = observability or ObservabilityConfig.from_dict(
+            config.get("observability") if config else None
+        )
 
         mode = str(config.get("mode", "off")).lower()
         self._active = mode not in ("off", "passthrough", "disabled")
@@ -86,13 +98,36 @@ class Middleware:
     def compress_messages(
         self, messages: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], CompressionStats]:
-        if not self._active or not messages:
-            return messages, CompressionStats()
+        with compression_span(self._observability, provider="none") as span:
+            result, stats = self._compress_sync(messages)
+            span.set_stats(stats)
+            return result, stats
 
-        # Apply deterministic strategies first — dedup, purge-errors, etc.
-        # They can shrink the span before we spend time tokenizing.
+    async def compress_messages_async(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], CompressionStats]:
+        with compression_span(self._observability, provider="none") as span:
+            result, stats = await self._compress_async(messages)
+            span.set_stats(stats)
+            return result, stats
+
+    # ----------------------------------------------------------------- #
+    # Compression pipeline (called from inside the span context)
+    # ----------------------------------------------------------------- #
+
+    def _compress_sync(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], CompressionStats]:
+        if not self._active or not messages:
+            return messages, CompressionStats(
+                method="empty" if not messages else "passthrough",
+            )
+
         for strategy in self._strategies:
             messages = strategy.apply(messages)
+
+        if not messages:
+            return messages, CompressionStats(method="empty")
 
         input_tokens = count_message_tokens(messages)
         if input_tokens < self._threshold:
@@ -106,6 +141,7 @@ class Middleware:
         out_msgs: list[dict[str, Any]] = []
         total_in = 0
         total_out = 0
+        total_cost = 0.0
         methods: set[str] = set()
 
         for msg in messages:
@@ -115,18 +151,24 @@ class Middleware:
             out_msgs.extend(compressed)
             total_in += stats.input_tokens
             total_out += stats.output_tokens
+            total_cost += stats.cost_usd
             methods.add(stats.method)
 
-        return out_msgs, _aggregate(total_in, total_out, methods)
+        return out_msgs, _aggregate(total_in, total_out, total_cost, methods)
 
-    async def compress_messages_async(
+    async def _compress_async(
         self, messages: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], CompressionStats]:
         if not self._active or not messages:
-            return messages, CompressionStats()
+            return messages, CompressionStats(
+                method="empty" if not messages else "passthrough",
+            )
 
         for strategy in self._strategies:
             messages = strategy.apply(messages)
+
+        if not messages:
+            return messages, CompressionStats(method="empty")
 
         input_tokens = count_message_tokens(messages)
         if input_tokens < self._threshold:
@@ -140,6 +182,7 @@ class Middleware:
         out_msgs: list[dict[str, Any]] = []
         total_in = 0
         total_out = 0
+        total_cost = 0.0
         methods: set[str] = set()
 
         for msg in messages:
@@ -149,16 +192,17 @@ class Middleware:
             out_msgs.extend(compressed)
             total_in += stats.input_tokens
             total_out += stats.output_tokens
+            total_cost += stats.cost_usd
             methods.add(stats.method)
 
-        return out_msgs, _aggregate(total_in, total_out, methods)
+        return out_msgs, _aggregate(total_in, total_out, total_cost, methods)
 
     # ----------------------------------------------------------------- #
     # Internal wiring
     # ----------------------------------------------------------------- #
 
     def _build_router(self, config: dict[str, Any]) -> Router:
-        router = Router(default=Verbatim())
+        router = Router(default=Verbatim(observability=self._observability))
         routing = config.get("routing") or {}
         for ctype_str, compressor_name in routing.items():
             try:
@@ -168,9 +212,6 @@ class Middleware:
                 continue
             factory = _COMPRESSOR_FACTORIES.get(compressor_name)
             if factory is None:
-                # Forward-compatible: a config referencing a compressor name
-                # we haven't implemented yet (e.g. 'semantic' in the future)
-                # falls back to default Verbatim silently with a log warning.
                 _log.warning(
                     "Compressor %r not available in this leanctx version; "
                     "falling back to default (verbatim) for %s",
@@ -178,25 +219,11 @@ class Middleware:
                     ctype_str,
                 )
                 continue
-            # Per-compressor config lives under its own key, e.g.
-            # {"lingua": {...}, "selfllm": {...}}. Missing key -> {}.
             compressor_cfg = config.get(compressor_name) or {}
-            router.register(ctype, factory(compressor_cfg))
+            router.register(ctype, factory(compressor_cfg, self._observability))
         return router
 
     def _build_strategies(self, config: dict[str, Any]) -> list[Strategy]:
-        """Materialize the Strategy pipeline from config.
-
-        Config shape::
-
-            "strategies": {
-                "dedup": true,
-                "purge_errors": {"after_turns": 4}
-            }
-
-        Both strategies are enabled by default in active mode. Set to
-        ``false`` to disable.
-        """
         strat_cfg = config.get("strategies") or {}
         out: list[Strategy] = []
 
@@ -213,7 +240,12 @@ class Middleware:
         return out
 
 
-def _aggregate(total_in: int, total_out: int, methods: set[str]) -> CompressionStats:
+def _aggregate(
+    total_in: int,
+    total_out: int,
+    total_cost: float,
+    methods: set[str],
+) -> CompressionStats:
     if not methods:
         method = "empty"
     elif len(methods) == 1:
@@ -225,4 +257,5 @@ def _aggregate(total_in: int, total_out: int, methods: set[str]) -> CompressionS
         output_tokens=total_out,
         ratio=(total_out / total_in) if total_in else 1.0,
         method=method,
+        cost_usd=total_cost,
     )

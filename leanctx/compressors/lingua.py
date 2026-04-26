@@ -37,6 +37,8 @@ import asyncio
 from typing import Any
 
 from leanctx._content import get_text_content
+from leanctx.observability.compressor_hooks import compressor_span
+from leanctx.observability.config import ObservabilityConfig
 from leanctx.stats import CompressionStats
 from leanctx.tokens import count_tokens
 
@@ -75,6 +77,7 @@ class Lingua:
         model: str = _DEFAULT_MODEL,
         ratio: float = 0.5,
         device: str | None = None,
+        observability: ObservabilityConfig | None = None,
     ) -> None:
         self.model = model
         # Same meaning as LLMLingua's ``rate``: fraction of tokens to KEEP.
@@ -87,12 +90,21 @@ class Lingua:
         # Lazy-loaded on first compress() call. Tests assign a mock here
         # directly to skip the real model load.
         self._prompt_compressor: Any = None
+        self.observability = observability or ObservabilityConfig()
 
     # ----------------------------------------------------------------- #
     # Compressor protocol
     # ----------------------------------------------------------------- #
 
     def compress(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], CompressionStats]:
+        with compressor_span(self.observability, name=self.name) as span:
+            stats = self._compress_inner(messages)
+            span.set_stats(stats[1])
+            return stats
+
+    def _compress_inner(
         self, messages: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], CompressionStats]:
         if not messages:
@@ -122,9 +134,13 @@ class Lingua:
     async def compress_async(
         self, messages: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], CompressionStats]:
-        # LLMLingua is synchronous under the hood. Offload so we don't
-        # block the event loop.
-        return await asyncio.to_thread(self.compress, messages)
+        # LLMLingua is synchronous under the hood. Offload the inner
+        # work, but keep the span entered in the calling thread/context
+        # so the depth counter behaves correctly.
+        with compressor_span(self.observability, name=self.name) as span:
+            result = await asyncio.to_thread(self._compress_inner, messages)
+            span.set_stats(result[1])
+            return result
 
     # ----------------------------------------------------------------- #
     # Per-message / per-block compression
