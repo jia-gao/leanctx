@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "leanctx"
-version = "0.0.0"
+version = "0.3.0"
 description = "Drop-in prompt compression for production LLM applications. Cut Anthropic / OpenAI / Gemini bills by 40-60%."
 readme = "README.md"
 requires-python = ">=3.10"
