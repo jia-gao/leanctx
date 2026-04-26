@@ -4,7 +4,7 @@ import leanctx
 
 
 def test_version() -> None:
-    assert leanctx.__version__ == "0.3.0"
+    assert leanctx.__version__ == "0.3.1"
 
 
 def test_importable() -> None:

@@ -50,6 +50,20 @@ _LINGUA_INSTALL_HINT = (
 _DEFAULT_MODEL = "microsoft/llmlingua-2-xlm-roberta-large-meetingbank"
 
 
+_STRUCTURAL_MARKERS = (
+    "```",  # fenced code block
+    "Traceback (most recent call last)",  # Python traceback
+)
+
+
+def _looks_structural(text: str) -> bool:
+    """True when ``text`` carries content that must survive compression
+    verbatim (code, tracebacks). Used by tool_result handling to keep
+    the structural-integrity invariants the agent-structural bench
+    scenario enforces."""
+    return any(marker in text for marker in _STRUCTURAL_MARKERS)
+
+
 def _auto_device() -> str:
     """Pick the best available device. CUDA > MPS (Apple Silicon) > CPU.
 
@@ -203,10 +217,18 @@ class Lingua:
         if btype == "tool_result":
             inner = block.get("content")
             if isinstance(inner, str):
-                if inner.strip():
-                    compressed, in_tok, out_tok = self._compress_text(inner)
-                    return {**block, "content": compressed}, in_tok, out_tok
-                return block, 0, 0
+                if not inner.strip():
+                    return block, 0, 0
+                # If the tool_result content carries fenced code blocks
+                # or a Python-style traceback, preserve verbatim — these
+                # are the structural-integrity invariants that callers
+                # rely on (a debugger or a coding agent must see exact
+                # tokens). The token cost stays honest in stats.
+                if _looks_structural(inner):
+                    tokens = count_tokens(inner)
+                    return block, tokens, tokens
+                compressed, in_tok, out_tok = self._compress_text(inner)
+                return {**block, "content": compressed}, in_tok, out_tok
             if isinstance(inner, list):
                 new_inner: list[Any] = []
                 total_in = 0

@@ -244,6 +244,64 @@ def test_lingua_compresses_tool_result_string_content() -> None:
     assert stats.ratio == pytest.approx(10 / 200)
 
 
+def test_lingua_preserves_tool_result_with_code_fence_verbatim() -> None:
+    """Regression guard: tool_result.content carrying a fenced code block
+    must NOT be passed through Lingua — structural integrity (the
+    agent-structural bench scenario) requires code preserved verbatim.
+    Fix landed 2026-04-26 after agent-structural caught the regression."""
+    lingua = Lingua()
+    fake = _fake_prompt_compressor(_mock_result())
+    lingua._prompt_compressor = fake
+
+    code_payload = (
+        "```python\n"
+        "DB_POOL_SIZE = 20\n"
+        "DB_QUERY_BUDGET = 7\n"
+        "```"
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_2",
+                    "content": code_payload,
+                }
+            ],
+        }
+    ]
+    out, _ = lingua.compress(messages)
+    block = out[0]["content"][0]
+    assert block["content"] == code_payload  # exact preservation
+    fake.compress_prompt.assert_not_called()
+
+
+def test_lingua_preserves_tool_result_with_traceback_verbatim() -> None:
+    """Same guard for Python tracebacks in tool_result content."""
+    lingua = Lingua()
+    fake = _fake_prompt_compressor(_mock_result())
+    lingua._prompt_compressor = fake
+
+    tb = (
+        "Traceback (most recent call last):\n"
+        "  File 'app.py', line 142, in process_payment\n"
+        "    conn = pool.acquire(timeout=5)\n"
+        "TimeoutError: pool exhausted after 5s"
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_3", "content": tb}
+            ],
+        }
+    ]
+    out, _ = lingua.compress(messages)
+    assert out[0]["content"][0]["content"] == tb
+    fake.compress_prompt.assert_not_called()
+
+
 def test_lingua_compresses_tool_result_nested_text_blocks() -> None:
     lingua = Lingua()
     # Same mock result returned for each call; we're checking the block

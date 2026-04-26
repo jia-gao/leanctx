@@ -16,7 +16,7 @@ from leanctx.router import Router
 from leanctx.stats import CompressionStats
 from leanctx.strategies import DedupStrategy, PurgeErrorsStrategy, Strategy
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "Anthropic",
