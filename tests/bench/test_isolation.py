@@ -55,16 +55,30 @@ def test_runs_n_invokes_runner_per_run(capsys: Any) -> None:
         scenarios.reset_for_tests()
 
 
-def test_real_lingua_local_runs_n_does_not_leak_dedup_state(capsys: Any) -> None:
+def test_real_lingua_local_runs_n_does_not_leak_dedup_state(
+    capsys: Any, monkeypatch: Any
+) -> None:
     """AC-9 / task29: invoke the actual `lingua-local` scenario via the
     CLI with --runs 5 and confirm input_tokens are stable across runs.
 
     Uses a stub PromptCompressor so the test runs without the real
     LLMLingua-2 model — but it exercises the SHIPPED runner code path,
-    not a custom test-only scenario."""
+    not a custom test-only scenario.
+
+    Monkeypatches ``cli._extra_installed`` so the test runs in a CI
+    environment where the [lingua] extra isn't installed; the test is
+    about isolation, not the extras-preflight gate (which is covered
+    separately by ``test_required_extras_cli_preflight_exits_3_before_runner``)."""
     import json
 
     import leanctx.compressors.lingua as lingua_mod  # noqa: PLC0415
+
+    real_extra_installed = cli._extra_installed
+    monkeypatch.setattr(
+        cli,
+        "_extra_installed",
+        lambda name: True if name == "lingua" else real_extra_installed(name),
+    )
 
     class _StubPC:
         """Stand-in for llmlingua.PromptCompressor — returns the input

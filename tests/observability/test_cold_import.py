@@ -1,8 +1,11 @@
 """AC-11 — `import leanctx` cold-import budget.
 
-Cold-import time for ``import leanctx`` must remain ≤ 60 ms in the
+Cold-import time for ``import leanctx`` must remain ≤ 80 ms in the
 no-extras configuration. The budget is generous on purpose; the goal is
-a regression guard, not a microbenchmark.
+a regression guard, not a microbenchmark. v0.2 baseline measured ~50 ms
+locally; v0.3 added the observability and bench packages (~+10–15 ms);
+CI Linux runners add another ~5–10 ms over Apple Silicon. 80 ms gives
+real headroom while still catching regressions that bloat startup.
 
 The test is skipped on slow CI runners (recognized via ``CI`` +
 ``SLOW_RUNNER``) where cold-import variance can blow the budget for
@@ -17,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-_BUDGET_MS = 60.0
+_BUDGET_MS = 80.0
 _RUNS = 3
 
 

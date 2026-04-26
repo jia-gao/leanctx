@@ -172,4 +172,4 @@ The pre-v0.3 telemetry surface (`usage.leanctx_method`, `usage.leanctx_ratio`, `
 
 ## Cold-import budget
 
-`import leanctx` (no extras) does not import `opentelemetry`. The `[otel]` extra adds the API package but the import is lazy — paid only on the first call to `compression_span` / `compressor_span`. Cold-import time stays under 60 ms.
+`import leanctx` (no extras) does not import `opentelemetry`. The `[otel]` extra adds the API package but the import is lazy — paid only on the first call to `compression_span` / `compressor_span`. Cold-import time stays under 80 ms (regression-guard budget; v0.2 baseline was ~50 ms; v0.3's added observability/bench modules took it to ~65 ms on slower CI runners).
