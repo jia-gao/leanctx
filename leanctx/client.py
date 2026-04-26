@@ -142,16 +142,13 @@ class _Messages:
 
     def stream(self, **kwargs: Any) -> Any:
         # Anthropic's sync messages.stream() returns a context manager
-        # (MessageStreamManager). The leanctx-wrapper span lifetime
-        # spans __enter__ to __exit__ of that CM. We compress at call
-        # time (here) and wrap the manager so __exit__ closes the span.
-        with compression_span(self._observability, provider="anthropic") as span:
-            messages = kwargs.get("messages", [])
-            compressed, stats = self._middleware.compress_messages(messages)
-            kwargs["messages"] = compressed
-            span.set_stats(stats)
-            upstream_cm = self._upstream.messages.stream(**kwargs)
-        return upstream_cm
+        # (MessageStreamManager). AC-2 path 2 contract: the leanctx
+        # span's lifetime spans the consumer's __enter__/__exit__ — not
+        # the synchronous stream() call. Wrap in a leanctx-owned CM so
+        # the wrapper span opens on __enter__ and closes on __exit__.
+        return _SyncStreamContextManager(
+            self._upstream.messages, kwargs, self._middleware, self._observability
+        )
 
 
 class _AsyncMessages:
@@ -179,6 +176,58 @@ class _AsyncMessages:
         return _AsyncStreamContextManager(
             self._upstream.messages, kwargs, self._middleware, self._observability
         )
+
+
+class _SyncStreamContextManager:
+    """Wraps ``anthropic.Anthropic.messages.stream`` so the leanctx span
+    lifetime matches the consumer's ``__enter__`` / ``__exit__``.
+
+    Compression runs at ``__enter__`` so the wrapper span captures the
+    full stream lifetime including chunk iteration. AC-2 path 2.
+    """
+
+    def __init__(
+        self,
+        upstream_messages: Any,
+        kwargs: dict[str, Any],
+        middleware: Middleware,
+        observability: ObservabilityConfig,
+    ) -> None:
+        self._upstream_messages = upstream_messages
+        self._kwargs = kwargs
+        self._middleware = middleware
+        self._observability = observability or ObservabilityConfig()
+        self._upstream_cm: Any = None
+        self._span_cm: compression_span | None = None
+        self._span: Any = None
+
+    def __enter__(self) -> Any:
+        self._span_cm = compression_span(self._observability, provider="anthropic")
+        self._span = self._span_cm.__enter__()
+        try:
+            messages = self._kwargs.get("messages", [])
+            compressed, stats = self._middleware.compress_messages(messages)
+            self._kwargs["messages"] = compressed
+            self._span.set_stats(stats)
+            self._upstream_cm = self._upstream_messages.stream(**self._kwargs)
+            return self._upstream_cm.__enter__()
+        except BaseException as exc:
+            self._span.set_error(exc)
+            self._span_cm.__exit__(type(exc), exc, exc.__traceback__)
+            self._span_cm = None
+            raise
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        try:
+            if self._upstream_cm is None:
+                return None
+            return self._upstream_cm.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            if self._span_cm is not None:
+                if exc_val is not None and self._span is not None:
+                    self._span.set_error(exc_val)
+                self._span_cm.__exit__(exc_type, exc_val, exc_tb)
+                self._span_cm = None
 
 
 class _AsyncStreamContextManager:

@@ -25,16 +25,33 @@ from leanctx.middleware import Middleware
 
 
 def test_anthropic_stream_forwards_to_upstream() -> None:
+    # v0.3: _Messages.stream now returns a leanctx-owned sync context
+    # manager that defers the upstream call to __enter__ so the wrapper
+    # span lifetime spans the consumer's __enter__/__exit__. Same shift
+    # already happened for async streams.
     upstream = MagicMock()
+    upstream_cm = MagicMock()
+    upstream_cm.__enter__ = MagicMock(return_value="sync_streaming_handle")
+    upstream_cm.__exit__ = MagicMock(return_value=None)
+    upstream.messages.stream = MagicMock(return_value=upstream_cm)
+
     wrapper = _Messages(upstream, Middleware({}))
     messages = [{"role": "user", "content": "hi"}]
 
-    result = wrapper.stream(model="claude-sonnet-4-6", messages=messages, max_tokens=10)
+    cm = wrapper.stream(model="claude-sonnet-4-6", messages=messages, max_tokens=10)
 
-    upstream.messages.stream.assert_called_once_with(
-        model="claude-sonnet-4-6", messages=messages, max_tokens=10
-    )
-    assert result is upstream.messages.stream.return_value
+    # Upstream call deferred until __enter__.
+    upstream.messages.stream.assert_not_called()
+
+    with cm as handle:
+        upstream.messages.stream.assert_called_once_with(
+            model="claude-sonnet-4-6", messages=messages, max_tokens=10
+        )
+        assert handle == "sync_streaming_handle"
+        upstream_cm.__enter__.assert_called_once()
+        upstream_cm.__exit__.assert_not_called()
+
+    upstream_cm.__exit__.assert_called_once()
 
 
 @pytest.mark.asyncio
