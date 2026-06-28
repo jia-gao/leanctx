@@ -122,6 +122,8 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 # code-quality issue.
 "scripts/integration_test_*.py" = ["E501"]
 "leanctx/bench/workloads.py" = ["E501"]
+# Report generator: long lines are plot labels and embedded report markdown.
+"benchmarks/clawrouter/reweight_prose_code_curve.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.10"
@@ -165,5 +167,6 @@ markers = [
     "unit: pure Python, no I/O, runs in CI always",
     "behavioral: real HTTP/process I/O but Node/key-free; runs in CI always",
     "integration: requires Node >=20 and built ClawRouter dist/",
+    "insforge: InsForge harness; requires a live leanctx sidecar (no Node, no API key)",
     "e2e: requires ANTHROPIC_API_KEY or OPENAI_API_KEY",
 ]

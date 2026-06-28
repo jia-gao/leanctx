@@ -10,12 +10,92 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# ── Re-exported provider-agnostic harness core (benchmarks.common) ─────
+# Extracted so the InsForge harness can reuse the scorer / LongBench /
+# verbatim / report logic; imported here to preserve the historical
+# ``benchmarks.clawrouter.bench_phase1`` import surface. See __all__.
+from benchmarks.common.longbench import (
+    _LB_ANS_RE_BARE,
+    _LB_ANS_RE_PAREN,
+    _LB_PROMPT_TEMPLATE,
+    _build_lb_prompt,
+    _extract_lb_answer,
+    _lb_head_tail,
+    _load_lb_items,
+)
+from benchmarks.common.report import format_report
+from benchmarks.common.runner import (
+    _build_eval_context,
+    call_eval_llm,
+)
+from benchmarks.common.runner import run_leg as _runner_run_leg
+from benchmarks.common.scoring import (
+    GateResult,
+    _percentile,
+    apply_gate,
+    compute_metrics,
+    mcnemar_paired,
+)
+from benchmarks.common.tokens import _sum_tokens
+from benchmarks.common.verbatim import (
+    _SIDECAR_THRESHOLD_DEFAULT,
+    _sidecar_threshold,
+    _verbatim_split_item,
+    acc_by_route,
+    aggregate_verbatim_metrics,
+    align_metric_pools,
+    assert_overall_parity,
+    assert_route_reuse_invariant,
+    validate_run_invariants,
+    verbatim_split_by_item,
+    write_by_item_dumps,
+)
+
+# Names re-exported above for the historical bench_phase1 import surface.
+__all__ = [
+    "GateResult",
+    "_LB_ANS_RE_BARE",
+    "_LB_ANS_RE_PAREN",
+    "_LB_PROMPT_TEMPLATE",
+    "_SIDECAR_THRESHOLD_DEFAULT",
+    "_build_lb_prompt",
+    "_build_eval_context",
+    "_extract_lb_answer",
+    "_lb_head_tail",
+    "_load_lb_items",
+    "_percentile",
+    "_sidecar_threshold",
+    "_sum_tokens",
+    "_verbatim_split_item",
+    "acc_by_route",
+    "aggregate_verbatim_metrics",
+    "align_metric_pools",
+    "apply_gate",
+    "apply_patch",
+    "assert_overall_parity",
+    "assert_route_reuse_invariant",
+    "call_eval_llm",
+    "compress_via_shim",
+    "compute_metrics",
+    "format_report",
+    "health_check",
+    "mcnemar_paired",
+    "run_leg",
+    "setup_clawrouter",
+    "spawn_cr_shim",
+    "spawn_leanctx_sidecar",
+    "validate_run_invariants",
+    "verbatim_split_by_item",
+    "wait_for_health",
+    "write_by_item_dumps",
+    "write_shim_file",
+    "main",
+]
 
 try:
     import httpx
@@ -155,861 +235,6 @@ def write_shim_file(workdir: Path) -> Path:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Sprint 4 — Scorer & reporter
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-@dataclass
-class GateResult:
-    passed: bool
-    fail_reason: str = ""
-
-
-def _percentile(values: list[float], q: float) -> float | None:
-    """Nearest-rank percentile (q in [0, 1]); None for an empty sample."""
-    if not values:
-        return None
-    s = sorted(values)
-    if len(s) == 1:
-        return float(s[0])
-    idx = min(int(round(q * (len(s) - 1))), len(s) - 1)
-    return float(s[idx])
-
-
-def compute_metrics(
-    records_a: list[dict[str, Any]],
-    records_b: list[dict[str, Any]],
-    records_cb: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    tokens_a = sum(r["tokens_compressed"] for r in records_a)
-    tokens_b = sum(r["tokens_compressed"] for r in records_b)
-
-    avg_raw = sum(r["tokens_raw"] for r in records_a) / len(records_a)
-    avg_a = tokens_a / len(records_a)
-    avg_b = tokens_b / len(records_b)
-
-    delta_tokens = (tokens_a - tokens_b) / tokens_a if tokens_a > 0 else 0.0
-    cr_savings = (avg_raw - avg_a) / avg_raw if avg_raw > 0 else 0.0
-    e2e_ratio = avg_b / avg_raw if avg_raw > 0 else 0.0
-
-    acc_a_vals = [r["accuracy"] for r in records_a if r.get("accuracy") is not None]
-    acc_b_vals = [r["accuracy"] for r in records_b if r.get("accuracy") is not None]
-    acc_a = sum(acc_a_vals) / len(acc_a_vals) if acc_a_vals else 0.0
-    acc_b = sum(acc_b_vals) / len(acc_b_vals) if acc_b_vals else 0.0
-    delta_accuracy = acc_b - acc_a
-
-    # Closed-book control: accuracy when the model answers from priors alone.
-    # If Leg A/B accuracy is at or below this, the context did no work and the
-    # "compression preserved information" claim is unsupported.
-    cb_vals = [
-        r["accuracy"]
-        for r in (records_cb or [])
-        if r.get("accuracy") is not None
-    ]
-    acc_closed_book: float | None = (
-        sum(cb_vals) / len(cb_vals) if cb_vals else None
-    )
-
-    # $15 / 1M input tokens (Sonnet price) × 1K conversations
-    cost_saved_per_1k = delta_tokens * avg_raw * (15 / 1e6) * 1000
-
-    # Sidecar (Layer 8) latency is the compression call in isolation, taken
-    # from Leg B records (the only leg with the sidecar in the path). The eval
-    # LLM time is reported separately and never folded into this figure.
-    compress_ms_b = [
-        r["compress_ms"] for r in records_b if r.get("compress_ms") is not None
-    ]
-    # Eval-LLM latency is sourced from Leg A, not Leg B: under the shared eval
-    # draw, verbatim Leg-B items reuse Leg A's answer and record eval_ms=0, so a
-    # Leg-B P50 would read ~0ms and misrepresent the judge as "free". Leg A
-    # always issues a real judge call (no prior to reuse), so its distribution is
-    # the honest per-call cost.
-    eval_ms_a = [r["eval_ms"] for r in records_a if r.get("eval_ms") is not None]
-
-    return {
-        "delta_tokens": delta_tokens,
-        "delta_accuracy": delta_accuracy,
-        "e2e_ratio": e2e_ratio,
-        "cr_savings": cr_savings,
-        "cost_saved_per_1k": cost_saved_per_1k,
-        "sidecar_p50_ms": _percentile(compress_ms_b, 0.50),
-        "sidecar_p95_ms": _percentile(compress_ms_b, 0.95),
-        "eval_p50_ms": _percentile(eval_ms_a, 0.50),
-        "eval_p95_ms": _percentile(eval_ms_a, 0.95),
-        "tokens_a": tokens_a,
-        "tokens_b": tokens_b,
-        "acc_a": acc_a,
-        "acc_b": acc_b,
-        "acc_closed_book": acc_closed_book,
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Verbatim-excluded compression metrics (Phase B)
-#
-# The headline Layer-8 savings is diluted by content the classifier routes to
-# Verbatim (code, errors, structured data). This second view reports the
-# compression ratio on ONLY the content leanctx actually compressed — a number
-# that is invariant to how much of the sample happens to be verbatim-routed.
-#
-# We replay leanctx's real eligibility filter + classifier on the Leg-A
-# (CR-only) output, which — because CR's 7 layers are deterministic — equals
-# the input leanctx saw inside Leg B. No leanctx core changes (that is Phase A).
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Mirrors leanctx.server._default_config(): the request-level token gate below
-# which the sidecar passes the whole request through verbatim. The harness
-# spawns the sidecar with the same environment, so reading it here reproduces
-# the value the sidecar actually used.
-_SIDECAR_THRESHOLD_DEFAULT = 1500
-
-
-def _sidecar_threshold() -> int:
-    return int(os.environ.get("LEANCTX_SERVER_THRESHOLD", str(_SIDECAR_THRESHOLD_DEFAULT)))
-
-
-def _verbatim_split_item(
-    msgs_a: list[dict[str, Any]],
-    msgs_b: list[dict[str, Any]],
-    *,
-    threshold: int,
-) -> tuple[int, int, int, str] | None:
-    """Bucket one item's Layer-8 input into verbatim vs compressed tokens.
-
-    ``msgs_a`` is the CR-only output (== what leanctx saw inside Leg B), aligned
-    message-for-message with ``msgs_b`` (the CR + leanctx output). Reuses
-    leanctx's *real* eligibility roles and ``classify()`` so there is no copied
-    routing logic to drift.
-
-    Returns ``(verbatim_tokens, compressed_in, compressed_out, route)`` where
-    ``route`` is ``"verbatim"`` | ``"lingua"`` | ``"hybrid"``, or ``None`` when
-    the two legs cannot be aligned (different message counts → caller skips).
-    """
-    from leanctx.classifier import classify
-    from leanctx.compressors import ContentType
-    from leanctx.server import _COMPRESSIBLE_ROLES
-
-    if len(msgs_a) != len(msgs_b):
-        return None
-
-    eligible = {
-        i
-        for i, m in enumerate(msgs_a)
-        if m.get("role") in _COMPRESSIBLE_ROLES and isinstance(m.get("content"), str)
-    }
-    # Request-level gate: if the eligible subset is under the threshold the
-    # whole request is passed through, so nothing is compressed.
-    eligible_tokens = sum(_sum_tokens([msgs_a[i]]) for i in eligible)
-    request_compressible = eligible_tokens >= threshold
-
-    verbatim = comp_in = comp_out = 0
-    n_compressed = 0
-    for i, (ma, mb) in enumerate(zip(msgs_a, msgs_b, strict=True)):
-        ta = _sum_tokens([ma])
-        is_compressed = (
-            request_compressible
-            and i in eligible
-            and classify(ma) is ContentType.PROSE
-        )
-        if is_compressed:
-            comp_in += ta
-            comp_out += _sum_tokens([mb])
-            n_compressed += 1
-        else:
-            verbatim += ta
-
-    if n_compressed == 0:
-        route = "verbatim"
-    elif n_compressed == len(msgs_a):
-        route = "lingua"
-    else:
-        route = "hybrid"
-    return verbatim, comp_in, comp_out, route
-
-
-def verbatim_split_by_item(
-    msgs_a_by_id: dict[str, list[dict[str, Any]]],
-    msgs_b_by_id: dict[str, list[dict[str, Any]]],
-    *,
-    threshold: int | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Per-item verbatim/non-verbatim token split for every item present in
-    both leg maps. Returns ``{item_id: {lx_* fields}}`` (items that cannot be
-    aligned are omitted)."""
-    if threshold is None:
-        threshold = _sidecar_threshold()
-    out: dict[str, dict[str, Any]] = {}
-    for item_id in msgs_a_by_id:
-        if item_id not in msgs_b_by_id:
-            continue
-        split = _verbatim_split_item(
-            msgs_a_by_id[item_id], msgs_b_by_id[item_id], threshold=threshold
-        )
-        if split is None:
-            continue
-        v, c_in, c_out, route = split
-        out[item_id] = {
-            "lx_verbatim_tokens": v,
-            "lx_compressed_in_tokens": c_in,
-            "lx_compressed_out_tokens": c_out,
-            "lx_route": route,
-        }
-    return out
-
-
-def aggregate_verbatim_metrics(
-    per_item: dict[str, dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Aggregate per-item splits into the figures the report needs. Returns
-    ``None`` when there is nothing to analyse."""
-    if not per_item:
-        return None
-
-    tot_v = sum(d["lx_verbatim_tokens"] for d in per_item.values())
-    tot_in = sum(d["lx_compressed_in_tokens"] for d in per_item.values())
-    tot_out = sum(d["lx_compressed_out_tokens"] for d in per_item.values())
-    n = len(per_item)
-
-    route_counts = {"verbatim": 0, "lingua": 0, "hybrid": 0}
-    for d in per_item.values():
-        route_counts[d["lx_route"]] = route_counts.get(d["lx_route"], 0) + 1
-
-    layer8_in = tot_v + tot_in
-    layer8_out = tot_v + tot_out
-    verbatim_share = tot_v / layer8_in if layer8_in else 0.0
-    nv_ratio = (tot_out / tot_in) if tot_in else None
-    nv_savings = (1.0 - nv_ratio) if nv_ratio is not None else None
-    overall_savings = (layer8_in - layer8_out) / layer8_in if layer8_in else 0.0
-
-    return {
-        "n_items": n,
-        "verbatim_tokens": tot_v,
-        "compressed_in_tokens": tot_in,
-        "compressed_out_tokens": tot_out,
-        "layer8_in_tokens": layer8_in,
-        "layer8_out_tokens": layer8_out,
-        "verbatim_share": verbatim_share,
-        "nonverbatim_ratio": nv_ratio,
-        "nonverbatim_savings": nv_savings,
-        "overall_savings": overall_savings,
-        "token_delta": tot_in - tot_out,
-        "route_counts": route_counts,
-        "avg_layer8_in": layer8_in / n,
-        "avg_layer8_out": layer8_out / n,
-        "avg_nv_in": tot_in / n,
-        "avg_nv_out": tot_out / n,
-    }
-
-
-def write_by_item_dumps(
-    out_dir: Path,
-    records_a: list[dict[str, Any]],
-    records_b: list[dict[str, Any]],
-    records_cb: list[dict[str, Any]],
-    msgs_a_by_id: dict[str, list[dict[str, Any]]],
-    msgs_b_by_id: dict[str, list[dict[str, Any]]],
-) -> list[Path]:
-    """Write one deep-dive JSON file per benchmark item under ``out_dir``.
-
-    Each file carries every field the flat JSONL holds for that item — the
-    Leg A record (CR only), the Leg B record (CR + leanctx Layer 8, already
-    enriched with the ``lx_*`` verbatim split), and the closed-book control
-    when present — plus the **full message payloads** on either side of
-    Layer 8 that the JSONL deliberately omits:
-
-      * ``input_before_layer8``  — the CR-only output, i.e. exactly what
-        leanctx saw as input inside Leg B (CR's 7 layers are deterministic).
-      * ``output_after_layer8``  — the CR + leanctx Layer 8 output.
-
-    Only items carrying an ``item_id`` are dumped (the agent warmup item has
-    none and is not tracked in the message sinks). Returns the files written.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    def _index(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-        return {r["item_id"]: r for r in records if r.get("item_id") is not None}
-
-    a_by_id = _index(records_a)
-    b_by_id = _index(records_b)
-    cb_by_id = _index(records_cb)
-
-    item_ids = (
-        set(a_by_id) | set(b_by_id) | set(cb_by_id)
-        | set(msgs_a_by_id) | set(msgs_b_by_id)
-    )
-
-    written: list[Path] = []
-    for item_id in sorted(item_ids):
-        rec_a = a_by_id.get(item_id)
-        rec_b = b_by_id.get(item_id)
-        dump = {
-            "item_id": item_id,
-            "workload": (rec_b or rec_a or {}).get("workload"),
-            "leg_a": rec_a,
-            "leg_b": rec_b,
-            "leg_closed_book": cb_by_id.get(item_id),
-            "input_before_layer8": msgs_a_by_id.get(item_id),
-            "output_after_layer8": msgs_b_by_id.get(item_id),
-        }
-        # item_id is a dataset hash, but sanitize defensively for filesystem use.
-        safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(item_id))
-        path = out_dir / f"{safe}.json"
-        path.write_text(json.dumps(dump, indent=2, ensure_ascii=False))
-        written.append(path)
-    return written
-
-
-def apply_gate(
-    metrics: dict[str, Any],
-    *,
-    savings_threshold: float = 0.20,
-    accuracy_drop: float = 0.02,
-) -> GateResult:
-    if metrics["delta_tokens"] < savings_threshold:
-        return GateResult(
-            passed=False,
-            fail_reason=(
-                f"savings delta {metrics['delta_tokens']:.4f} below threshold {savings_threshold}"
-            ),
-        )
-    if metrics["delta_accuracy"] < -accuracy_drop:
-        return GateResult(
-            passed=False,
-            fail_reason=(
-                f"accuracy dropped {-metrics['delta_accuracy']:.4f} exceeds allowed {accuracy_drop}"
-            ),
-        )
-    return GateResult(passed=True)
-
-
-def acc_by_route(
-    records_a: list[dict[str, Any]],
-    records_b: list[dict[str, Any]],
-) -> list[tuple[str, int, float, float]]:
-    """Accuracy split by leanctx route — ``verbatim`` / ``lingua`` / ``hybrid``
-    plus an ``overall`` row — as ``(label, N, acc_a, acc_b)``.
-
-    Only Leg B carries ``lx_route``; each item's route is joined back onto the
-    Leg A record by ``item_id`` so both legs are compared on the *same*
-    partition. This is the lens that separates real compression effects (the
-    ``lingua`` row, where leanctx actually rewrote the context) from eval noise
-    on untouched items (the ``verbatim`` row, which — with the shared eval draw —
-    is pinned to Δ = 0 by construction). Items lacking a route or an accuracy on
-    either leg are skipped.
-    """
-    route_by_id = {
-        r.get("item_id"): r.get("lx_route")
-        for r in records_b
-        if r.get("item_id") is not None and r.get("lx_route")
-    }
-    a_by_id = {r.get("item_id"): r for r in records_a if r.get("item_id") is not None}
-    b_by_id = {r.get("item_id"): r for r in records_b if r.get("item_id") is not None}
-
-    buckets: dict[str, list[tuple[bool, bool]]] = {}
-    overall: list[tuple[bool, bool]] = []
-    for item_id, route in route_by_id.items():
-        ra, rb = a_by_id.get(item_id), b_by_id.get(item_id)
-        if ra is None or rb is None:
-            continue
-        if ra.get("accuracy") is None or rb.get("accuracy") is None:
-            continue
-        pair = (bool(ra["accuracy"]), bool(rb["accuracy"]))
-        buckets.setdefault(route, []).append(pair)
-        overall.append(pair)
-
-    def _row(label: str, pairs: list[tuple[bool, bool]]) -> tuple[str, int, float, float]:
-        n = len(pairs)
-        acc_a = sum(a for a, _ in pairs) / n if n else 0.0
-        acc_b = sum(b for _, b in pairs) / n if n else 0.0
-        return (label, n, acc_a, acc_b)
-
-    rows = [
-        _row(route, buckets[route])
-        for route in ("verbatim", "lingua", "hybrid")
-        if route in buckets
-    ]
-    if overall:
-        rows.append(_row("overall", overall))
-    return rows
-
-
-def assert_route_reuse_invariant(records_b: list[dict[str, Any]]) -> None:
-    """Make the ``verbatim`` row's *Δ = 0* mechanical, not coincidental.
-
-    ``acc_by_route`` pins the verbatim row to Δ = 0 *only if* every
-    verbatim-labelled item actually reused Leg A's eval draw — byte-identical
-    prompt ⇒ same answer object ⇒ same accuracy. But the route label and the
-    reuse decision are produced by two **independent** paths: the label comes
-    from leanctx's ``classify()`` + threshold replay (``_verbatim_split_item``),
-    while reuse fires on a byte-identical ``_build_eval_context`` (``:1284``).
-    Nothing else cross-checks them, so the headline guarantee is otherwise just
-    prose, contingent on the classifier replay always matching the sidecar.
-
-    This consumes the ``eval_reused`` flag and asserts the two paths agree:
-    every ``verbatim`` item was reused (Δ pinned to 0) and no ``lingua`` /
-    ``hybrid`` item was (a compressed item must be scored on its own draw, not
-    silently inherit Leg A's). It also catches the truncation false-hit the
-    review flagged — a genuinely-compressed item whose change lands in the
-    dropped middle would reuse on a ``lingua`` label and trip the second clause.
-
-    Only Leg B records carry a route; items without a route or without an eval
-    (``eval_reused`` unset) are outside ``acc_by_route``'s set and are skipped.
-    Raises ``AssertionError`` on any divergence.
-    """
-    violations: list[str] = []
-    for r in records_b:
-        route = r.get("lx_route")
-        if not route or r.get("eval_reused") is None:
-            continue
-        reused = bool(r["eval_reused"])
-        item_id = r.get("item_id")
-        if route == "verbatim" and not reused:
-            violations.append(
-                f"  {item_id}: route=verbatim but eval_reused=False "
-                "→ Δ not pinned to 0 (verbatim row would carry decoder noise)"
-            )
-        elif route in ("lingua", "hybrid") and reused:
-            violations.append(
-                f"  {item_id}: route={route} but eval_reused=True "
-                "→ compressed item silently scored as a no-op (false cache hit)"
-            )
-    if violations:
-        raise AssertionError(
-            "route/reuse invariant violated — 'verbatim Δ=0' is not mechanical:\n"
-            + "\n".join(violations)
-        )
-
-
-def assert_overall_parity(
-    records_a: list[dict[str, Any]],
-    records_b: list[dict[str, Any]],
-) -> None:
-    """Keep the two ``overall`` accuracy figures from silently diverging.
-
-    Section 3's headline pools *every* scored item (accuracy not ``None``);
-    ``acc_by_route``'s ``overall`` row pools only items that *also* carry a
-    route, joined Leg A↔B by ``item_id``. On the current single-message LB
-    workload these are the same set, so the two figures agree — but nothing
-    structurally guarantees it. This asserts the sets coincide: Leg A and Leg B
-    score the same item_ids, and every scored Leg B item carries a route. If
-    they ever drift (e.g. a scored item without a route label), the headline and
-    the by-route ``overall`` would quietly disagree; this fails loudly instead.
-
-    Skipped entirely when no item carries a route (no by-route table to desync).
-    Raises ``AssertionError`` on divergence.
-    """
-    a_ids = {r.get("item_id") for r in records_a if r.get("accuracy") is not None}
-    b_ids = {r.get("item_id") for r in records_b if r.get("accuracy") is not None}
-    routed = {
-        r.get("item_id")
-        for r in records_b
-        if r.get("accuracy") is not None and r.get("lx_route")
-    }
-    if not routed:
-        return  # no by-route 'overall' row exists, nothing to reconcile
-
-    problems: list[str] = []
-    if a_ids != b_ids:
-        problems.append(
-            f"  Leg A/B scored sets differ: A-only={sorted(a_ids - b_ids)}, "
-            f"B-only={sorted(b_ids - a_ids)}"
-        )
-    if b_ids != routed:
-        problems.append(
-            f"  scored Leg B items missing a route: {sorted(b_ids - routed)}"
-        )
-    if problems:
-        raise AssertionError(
-            "headline vs by-route 'overall' set parity violated — the two "
-            "'overall' accuracies are computed from different sets:\n"
-            + "\n".join(problems)
-        )
-
-
-def validate_run_invariants(
-    records_a: list[dict[str, Any]],
-    records_b: list[dict[str, Any]],
-) -> None:
-    """Methodology self-checks for a finished run. Raises ``AssertionError`` on
-    violation.
-
-    These used to live inside ``format_report``, but ``main`` renders the report
-    *before* it persists the JSONL/report/dumps — so a raise there discarded a
-    completed, fully-paid-for run with nothing written. ``main`` now calls this
-    only *after* every artifact is on disk, so a violation is surfaced loudly
-    (non-zero exit) without destroying the run's output. ``format_report`` is
-    kept a pure formatter.
-
-    Operates on the same scored (accuracy-bearing) Leg-A/Leg-B subsets the report
-    pools, so it validates exactly what the report shows.
-    """
-    lb_a = [r for r in records_a if r.get("accuracy") is not None]
-    lb_b = [r for r in records_b if r.get("accuracy") is not None]
-    assert_route_reuse_invariant(lb_b)
-    assert_overall_parity(lb_a, lb_b)
-
-
-def align_metric_pools(
-    records_a: list[dict[str, Any]],
-    records_b: list[dict[str, Any]],
-    *,
-    exclude_workloads: set[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return ``(all_a, all_b)`` filtered to the *shared* metric pool.
-
-    An item is kept only if **both** legs produced it with ``tokens_compressed >
-    0`` and its workload is not excluded. Filtering each leg independently could
-    drop an item from one leg only — e.g. a leg compresses it to 0 tokens, or the
-    sidecar fail-opens — which would (a) make ``compute_metrics``' ``delta_tokens``
-    compare mismatched populations (skewing the savings gate) and (b) trip the
-    headline-vs-by-route parity check. After ``exclude_workloads`` the survivors
-    are LongBench items, which always carry an ``item_id``.
-    """
-    def _in_pool(r: dict[str, Any]) -> bool:
-        return r["tokens_compressed"] > 0 and r.get("workload") not in exclude_workloads
-
-    a_pool_ids = {r.get("item_id") for r in records_a if _in_pool(r)}
-    b_pool_ids = {r.get("item_id") for r in records_b if _in_pool(r)}
-    shared_ids = a_pool_ids & b_pool_ids
-    all_a = [r for r in records_a if _in_pool(r) and r.get("item_id") in shared_ids]
-    all_b = [r for r in records_b if _in_pool(r) and r.get("item_id") in shared_ids]
-    return all_a, all_b
-
-
-def format_report(
-    metrics: dict[str, Any],
-    gate: GateResult,
-    records_a: list[dict[str, Any]] | None = None,
-    records_b: list[dict[str, Any]] | None = None,
-    *,
-    run_date: str = "",
-    eval_model: str = "",
-    cr_commit: str = "",
-    savings_threshold: float = 0.20,
-    accuracy_drop: float = 0.02,
-    verbatim_metrics: dict[str, Any] | None = None,
-) -> str:
-    """Generate a rich Markdown Phase 1 report.
-
-    Falls back to a compact 7-line summary when records are not supplied
-    (keeps Sprint 4 unit tests green).
-    """
-    verdict = "PASS" if gate.passed else "NO-GO"
-
-    # ── compact fallback (used by unit tests) ────────────────────────────
-    if records_a is None or records_b is None:
-        lines = [
-            f"## Phase 1 Report — {verdict}",
-            "",
-            f"delta_tokens      : {metrics.get('delta_tokens', 'N/A'):.4f}"
-            if isinstance(metrics.get("delta_tokens"), float)
-            else f"delta_tokens      : {metrics.get('delta_tokens', 'N/A')}",
-            f"delta_accuracy    : {metrics.get('delta_accuracy', 'N/A'):.4f}"
-            if isinstance(metrics.get("delta_accuracy"), float)
-            else f"delta_accuracy    : {metrics.get('delta_accuracy', 'N/A')}",
-            f"e2e_ratio         : {metrics.get('e2e_ratio', 'N/A'):.4f}"
-            if isinstance(metrics.get("e2e_ratio"), float)
-            else f"e2e_ratio         : {metrics.get('e2e_ratio', 'N/A')}",
-            f"cr_savings        : {metrics.get('cr_savings', 'N/A'):.4f}"
-            if isinstance(metrics.get("cr_savings"), float)
-            else f"cr_savings        : {metrics.get('cr_savings', 'N/A')}",
-            f"cost_saved_per_1k : {metrics.get('cost_saved_per_1k', 'N/A'):.4f}"
-            if isinstance(metrics.get("cost_saved_per_1k"), float)
-            else f"cost_saved_per_1k : {metrics.get('cost_saved_per_1k', 'N/A')}",
-            f"sidecar_p50_ms    : {metrics.get('sidecar_p50_ms', 'N/A')}",
-        ]
-        if not gate.passed:
-            lines.append(f"\nFail reason: {gate.fail_reason}")
-        return "\n".join(lines)
-
-    # ── rich report ──────────────────────────────────────────────────────
-    import datetime
-
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    date_str = run_date or now_utc.strftime("%Y-%m-%d %H:%M UTC")
-    verdict_icon = "✅" if gate.passed else "❌"
-
-    def pct(v: float | None) -> str:
-        return f"{v * 100:.1f}%" if v is not None else "N/A"
-
-    def fmt_f(v: float | None, decimals: int = 4) -> str:
-        return f"{v:.{decimals}f}" if v is not None else "N/A"
-
-    lb_a = [r for r in records_a if r.get("accuracy") is not None]
-    lb_b = [r for r in records_b if r.get("accuracy") is not None]
-
-    n_lb = len(lb_a)
-    acc_a = metrics.get("acc_a", 0.0)
-    acc_b = metrics.get("acc_b", 0.0)
-    delta_acc = metrics.get("delta_accuracy", 0.0)
-
-    tokens_raw_avg = sum(r["tokens_raw"] for r in records_a) / max(len(records_a), 1)
-    tokens_a_avg = metrics.get("tokens_a", 0) / max(len(records_a), 1)
-    tokens_b_avg = metrics.get("tokens_b", 0) / max(len(records_b), 1)
-
-    # go/no-go row helpers
-    def gate_row(label: str, threshold: str, actual: str, passed_cond: bool) -> str:
-        return f"| {label} | {threshold} | {actual} | {'✅ PASS' if passed_cond else '❌ FAIL'} |"
-    savings_ok = metrics.get("delta_tokens", 0.0) >= savings_threshold
-    accuracy_ok = delta_acc >= -accuracy_drop
-
-    # CR layer stats (average across all records_a)
-    def _avg_stat(key: str) -> float:
-        vals = [r.get("cr_stats", {}).get(key, 0) for r in records_a if r.get("cr_stats")]
-        return sum(vals) / len(vals) if vals else 0.0
-
-    cr_layers = [
-        ("L1 Dedup",      "duplicatesRemoved",       _avg_stat("duplicatesRemoved")),
-        ("L2 Whitespace", "whitespaceSavedChars",     _avg_stat("whitespaceSavedChars")),
-        ("L3 Dictionary", "dictionarySubstitutions",  _avg_stat("dictionarySubstitutions")),
-        ("L4 Paths",      "pathsShortened",           _avg_stat("pathsShortened")),
-        ("L5 JSON",       "jsonCompactedChars",       _avg_stat("jsonCompactedChars")),
-        ("L6 Observation","observationsCompressed",   _avg_stat("observationsCompressed")),
-        ("L7 Codebook",   "dynamicSubstitutions",     _avg_stat("dynamicSubstitutions")),
-    ]
-
-    # accuracy breakdown helper — each metadata bucket (e.g. easy/hard) is
-    # further split by leanctx route, so the verbatim row (Δ pinned to 0 by the
-    # shared eval draw) is separated from the lingua row (the genuine
-    # compression signal), with a per-bucket overall row. Route is carried only
-    # by Leg B; both legs are compared on the same item partition by item_id.
-    def _acc_table_by_route(key: str) -> list[str]:
-        route_by_id = {
-            r.get("item_id"): r.get("lx_route")
-            for r in lb_b
-            if r.get("item_id") is not None and r.get("lx_route")
-        }
-        a_by_id = {r.get("item_id"): r for r in lb_a if r.get("item_id") is not None}
-        b_by_id = {r.get("item_id"): r for r in lb_b if r.get("item_id") is not None}
-
-        buckets: dict[str, dict[str, list[tuple[bool, bool]]]] = {}
-        for item_id, route in route_by_id.items():
-            ra, rb = a_by_id.get(item_id), b_by_id.get(item_id)
-            if ra is None or rb is None:
-                continue
-            if ra.get("accuracy") is None or rb.get("accuracy") is None:
-                continue
-            bucket = ra.get(key, "") or "unknown"
-            pair = (bool(ra["accuracy"]), bool(rb["accuracy"]))
-            buckets.setdefault(bucket, {}).setdefault(route, []).append(pair)
-
-        def _cells(pairs: list[tuple[bool, bool]]) -> str:
-            n = len(pairs)
-            aa = sum(a for a, _ in pairs) / n
-            bb = sum(b for _, b in pairs) / n
-            return f"{n} | {pct(aa)} | {pct(bb)} | {pct(bb - aa)}"
-
-        rows = ["| | route | N | Leg A | Leg B | Δ |", "|---|---|---|---|---|---|"]
-        for bucket in sorted(buckets):
-            routes = buckets[bucket]
-            for route in ("verbatim", "lingua", "hybrid"):
-                if route in routes:
-                    rows.append(f"| {bucket} | {route} | {_cells(routes[route])} |")
-            overall = [p for ps in routes.values() for p in ps]
-            rows.append(f"| {bucket} | **overall** | {_cells(overall)} |")
-        return rows
-
-    def _ms(v: float | None) -> str:
-        return f"{v:,.0f} ms" if v is not None else "N/A"
-
-    p50_str = _ms(metrics.get("sidecar_p50_ms"))
-    p95_str = _ms(metrics.get("sidecar_p95_ms"))
-    eval_p50_str = _ms(metrics.get("eval_p50_ms"))
-    eval_p95_str = _ms(metrics.get("eval_p95_ms"))
-
-    # ── build report ─────────────────────────────────────────────────────
-    out: list[str] = []
-    A = out.append
-
-    A("# ClawRouter × leanctx — Phase 1 Benchmark Report")
-    A("")
-    A(f"**Verdict: {verdict_icon} {verdict}**  ·  "
-      f"Date: {date_str}  ·  "
-      f"LB N={n_lb}  ·  "
-      + (f"Eval: {eval_model}  ·  " if eval_model else "")
-      + (f"CR commit: `{cr_commit[:8]}`" if cr_commit else ""))
-    A("")
-    A("---")
-    A("")
-
-    # 1. Go/No-Go gate
-    A("## 1. Go / No-Go Gate")
-    A("")
-    A("| Condition | Threshold | Actual | Result |")
-    A("|-----------|-----------|--------|--------|")
-    A(gate_row(
-        "Δ tokens — extra savings from Layer 8",
-        f"≥ {savings_threshold * 100:.0f}%",
-        pct(metrics.get("delta_tokens")),
-        savings_ok,
-    ))
-    A(gate_row(
-        "Δ accuracy — LongBench quality",
-        f"≥ −{accuracy_drop * 100:.0f}%",
-        pct(delta_acc),
-        accuracy_ok,
-    ))
-    A("")
-    if not gate.passed:
-        A(f"> ⚠️  **Fail reason:** {gate.fail_reason}")
-        A("")
-
-    # 2. Token compression
-    A("## 2. Token Compression")
-    A("")
-    A("| Stage | Avg tokens / request | vs raw | vs Leg A |")
-    A("|-------|---------------------|--------|----------|")
-    A(f"| Raw (uncompressed) | {tokens_raw_avg:,.0f} | — | — |")
-    A(f"| **Leg A** — CR 7 layers | {tokens_a_avg:,.0f} | "
-      f"−{pct(metrics.get('cr_savings'))} | — |")
-    A(f"| **Leg B** — CR + leanctx Layer 8 | {tokens_b_avg:,.0f} | "
-      f"−{pct(1 - metrics.get('e2e_ratio', 1.0))} | "
-      f"−{pct(metrics.get('delta_tokens'))} |")
-    A("")
-
-    # 2b. Compression excluding verbatim content
-    if verbatim_metrics is not None:
-        vm = verbatim_metrics
-        rc = vm["route_counts"]
-        n = vm["n_items"]
-        overall_ratio = (
-            vm["layer8_out_tokens"] / vm["layer8_in_tokens"]
-            if vm["layer8_in_tokens"]
-            else None
-        )
-        A("## 2b. Compression Excluding Verbatim Content")
-        A("")
-        A("_Layer 8 routes code, errors, and structured content to **Verbatim "
-          "(0%)**. This view reports compression on only the content actually "
-          "sent to the compressor — a figure invariant to how much of the sample "
-          "is verbatim-routed (see `oversampling_analysis.html`)._")
-        A("")
-        A(f"**Verbatim share:** {pct(vm['verbatim_share'])} of Layer-8 input "
-          f"tokens were preserved verbatim. Routing mix over {n} items: "
-          f"{rc.get('lingua', 0)} compressed · {rc.get('verbatim', 0)} verbatim · "
-          f"{rc.get('hybrid', 0)} mixed.")
-        A("")
-        A("| View | Avg input / req | Avg output / req | Ratio | Savings | Δ tokens / req |")
-        A("|------|-----------------|------------------|-------|---------|----------------|")
-        A(f"| Overall (incl. verbatim) | {vm['avg_layer8_in']:,.0f} | "
-          f"{vm['avg_layer8_out']:,.0f} | {fmt_f(overall_ratio, 3)} | "
-          f"{pct(vm['overall_savings'])} | {vm['token_delta'] / n:,.0f} |")
-        A(f"| **Non-verbatim only** | {vm['avg_nv_in']:,.0f} | "
-          f"{vm['avg_nv_out']:,.0f} | {fmt_f(vm['nonverbatim_ratio'], 3)} | "
-          f"{pct(vm['nonverbatim_savings'])} | {vm['token_delta'] / n:,.0f} |")
-        A("")
-        A(f"_Decomposition: overall {pct(vm['overall_savings'])} ≈ "
-          f"(1 − {pct(vm['verbatim_share'])}) × non-verbatim "
-          f"{pct(vm['nonverbatim_savings'])}. The absolute token delta is "
-          f"identical in both views — verbatim content contributes 0._")
-        A("")
-
-    # 3. LongBench accuracy
-    A("## 3. LongBench v2 Accuracy")
-    A("")
-    if n_lb > 0:
-        A("| | N | Leg A (CR only) | Leg B (CR + leanctx) | Δ |")
-        A("|---|---|---|---|---|")
-        A(f"| **Overall** | {n_lb} | {pct(acc_a)} | {pct(acc_b)} | {pct(delta_acc)} |")
-        A("")
-        acc_cb = metrics.get("acc_closed_book")
-        if acc_cb is not None:
-            lift_a = acc_a - acc_cb
-            lift_b = acc_b - acc_cb
-            A("**Closed-book control** (no document — answers from priors only): "
-              f"{pct(acc_cb)}. Context lift: Leg A {pct(lift_a)}, Leg B {pct(lift_b)}.")
-            if lift_b <= 0:
-                A("")
-                A("> ⚠️  Leg B accuracy does not beat the closed-book baseline — "
-                  "the compressed context may not be carrying the answer. Treat the "
-                  "accuracy result with caution.")
-            A("")
-        # The verbatim-row Δ=0 mechanism (assert_route_reuse_invariant) and the
-        # headline/by-route 'overall' parity (assert_overall_parity) are checked
-        # by validate_run_invariants() in main() *after* all artifacts are
-        # written — so a methodology violation surfaces loudly without discarding
-        # a completed, fully-paid-for run. The renderer itself stays pure.
-        route_rows = acc_by_route(lb_a, lb_b)
-        if route_rows:
-            A("### By leanctx route")
-            A("")
-            A("_`verbatim` = leanctx passed the context through unchanged; "
-              "`lingua` = leanctx actually compressed it. With the shared eval "
-              "draw, identical-input (verbatim) items score identically on both "
-              "legs, so any non-zero Δ here lives entirely in `lingua`._")
-            A("")
-            A("| route | N | Leg A | Leg B | Δ |")
-            A("|---|---|---|---|---|")
-            for label, n, ra, rb in route_rows:
-                disp = f"**{label}**" if label == "overall" else label
-                A(f"| {disp} | {n} | {pct(ra)} | {pct(rb)} | {pct(rb - ra)} |")
-            A("")
-        for _hdr, _key in (
-            ("By difficulty", "lb_difficulty"),
-            ("By length", "lb_length"),
-            ("By domain", "lb_domain"),
-        ):
-            tbl = _acc_table_by_route(_key)
-            if len(tbl) > 2:  # header + separator only ⇒ no data to show
-                A(f"### {_hdr}")
-                A("")
-                out.extend(tbl)
-                A("")
-    else:
-        A("_No LongBench items in this run._")
-        A("")
-
-    # 4. CR layer contribution (Leg A)
-    A("## 4. ClawRouter Layer Contributions (Leg A avg)")
-    A("")
-    A("| Layer | Statistic | Avg value |")
-    A("|-------|-----------|-----------|")
-    for name, stat, val in cr_layers:
-        A(f"| {name} | {stat} | {val:,.1f} |")
-    layer8_delta = (
-        (metrics.get("tokens_a", 0) - metrics.get("tokens_b", 0)) / max(len(records_a), 1)
-    )
-    A(f"| **L8 leanctx** | Δ tokens / item | **{layer8_delta:,.0f}** |")
-    A("")
-
-    # 5. Latency
-    A("## 5. Latency")
-    A("")
-    A("_Sidecar = the Layer 8 compression call in isolation (Leg B). Eval LLM "
-      "time is the LongBench judge call, sourced from **Leg A** (every item gets "
-      "a real call there; Leg B reuses identical-input draws at 0ms under the "
-      "shared draw, which would otherwise read as a free judge). It is shown "
-      "separately and is **not** part of the sidecar figure._")
-    A("")
-    A("| Metric | P50 | P95 |")
-    A("|--------|-----|-----|")
-    A(f"| Sidecar (Layer 8 compression) | {p50_str} | {p95_str} |")
-    A(f"| Eval LLM (LongBench answer) | {eval_p50_str} | {eval_p95_str} |")
-    A("")
-
-    # 6. Cost analysis
-    A("## 6. Cost Analysis")
-    A("")
-    cost = metrics.get("cost_saved_per_1k", 0.0)
-    delta_t = metrics.get("delta_tokens", 0.0)
-    A("Assuming Claude Sonnet input pricing ($15 / 1M tokens):")
-    A("")
-    A("```")
-    A(f"Δ tokens      = {pct(delta_t)} of avg {tokens_raw_avg:,.0f} raw tokens")
-    A(f"Savings / req = {delta_t * tokens_raw_avg:,.0f} tokens")
-    A(f"Cost saved    = {delta_t * tokens_raw_avg * 15 / 1e6:.4f} USD / request")
-    A(f"              = ${cost:,.2f} per 1 000 requests")
-    A("```")
-    A("")
-    A("---")
-    A("")
-    short_commit = cr_commit[:8] if cr_commit else "unknown"
-    A(f"_Generated by `bench_phase1.py` · CR commit `{short_commit}`_")
-
-    return "\n".join(out)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 # Sprint 5 — Service lifecycle
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1116,254 +341,6 @@ def compress_via_shim(messages: list[dict], shim_url: str) -> dict:
     return r.json()
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Sprint 7 — Leg runner & CLI
-# ═══════════════════════════════════════════════════════════════════════════
-
-# LongBench v2 prompt template (mirrors THUDM/LongBench pred.py).
-#
-# The forced-choice sentence is a deliberate addition to the upstream template:
-# without it the eval model hedges ("I can't answer without the text") whenever
-# the context is thin or absent, and the extraction regex scores that as a miss.
-# In the closed-book control that dragged accuracy *below* the 25% random-chance
-# floor for a 4-way MC, inflating the apparent context lift. Requiring a single
-# best-guess letter every time makes the control reflect the model's actual
-# prior rather than its willingness to abstain. It lives in the shared template
-# (not a closed-book-only rider) so both legs see a byte-identical instruction —
-# the A/B differs only in $DOC$, never in the prompt scaffolding.
-_LB_PROMPT_TEMPLATE = (
-    "Please read the following text and answer the question below.\n\n"
-    "<text>\n$DOC$\n</text>\n\n"
-    "What is the correct answer to this question: $Q$\n"
-    "Choices:\n"
-    "(A) $C_A$\n(B) $C_B$\n(C) $C_C$\n(D) $C_D$\n\n"
-    "You must commit to exactly one option even if the text is thin or missing: "
-    "pick the single most likely choice from the text and your own best guess, "
-    "and never reply that you cannot answer.\n"
-    'Format your response as follows: "The correct answer is (insert answer here)".'
-)
-_LB_ANS_RE_PAREN = re.compile(r"The correct answer is \(([A-D])\)")
-_LB_ANS_RE_BARE = re.compile(r"The correct answer is ([A-D])")
-
-
-def _build_lb_prompt(item: dict, context: str) -> str:
-    """Render the LongBench MC prompt for an item against a context string.
-
-    The same template is used for every leg (open- and closed-book): the only
-    thing that varies is ``context`` (the ``$DOC$`` slot), so any accuracy gap
-    is attributable to the document, not to a prompt difference.
-    """
-    return (
-        _LB_PROMPT_TEMPLATE
-        .replace("$DOC$", context)
-        .replace("$Q$", item.get("question", ""))
-        .replace("$C_A$", item.get("choice_A", ""))
-        .replace("$C_B$", item.get("choice_B", ""))
-        .replace("$C_C$", item.get("choice_C", ""))
-        .replace("$C_D$", item.get("choice_D", ""))
-    )
-
-
-def _extract_lb_answer(response: str) -> str | None:
-    m = _LB_ANS_RE_PAREN.search(response.replace("*", ""))
-    if not m:
-        m = _LB_ANS_RE_BARE.search(response)
-    return m.group(1) if m else None
-
-
-def _lb_head_tail(text: str, max_chars: int = 112_000) -> str:
-    """Truncate to ~28K tokens (112K chars ≈ 4 chars/token) to fit 30K tok/min rate limit."""
-    if len(text) <= max_chars:
-        return text
-    half = max_chars // 2
-    return text[:half] + "\n...[truncated]...\n" + text[-half:]
-
-
-def _load_lb_items(
-    limit: int = 5,
-    workload_tag: str = "lb_s1",
-    *,
-    seed: int = 1234,
-    oversample_long: bool = True,
-) -> list[dict[str, Any]]:
-    """Load and format LongBench v2 items for run_leg().
-
-    Sampling is stratified across (length × difficulty) cells but **random
-    within each cell** (seeded for reproducibility) — the previous
-    ``cell_items[:per_cell]`` took the first-N of each cell, which produced
-    the suspiciously balanced buckets the reviewer called out.
-
-    With ``oversample_long`` the ``long`` length category is given 1.5×
-    weight, since that is where Layer 8 showed a real (−10%) accuracy risk at
-    small N and needs more samples before any safety claim.
-    """
-    import random as _random
-
-    from datasets import load_dataset
-
-    ds = load_dataset("THUDM/LongBench-v2", split="train")
-    items: list[dict] = list(ds)
-
-    if limit > 0 and len(items) > limit:
-        rng = _random.Random(seed)
-        cells: dict[tuple[str, str], list[dict]] = {}
-        for it in items:
-            key = (it.get("length", ""), it.get("difficulty", ""))
-            cells.setdefault(key, []).append(it)
-
-        # Weight cells; long-context cells get 1.5× weight when oversampling.
-        weights = {
-            key: (1.5 if oversample_long and key[0] == "long" else 1.0)
-            for key in cells
-        }
-        total_weight = sum(weights.values())
-
-        sample: list[dict] = []
-        for key, cell_items in cells.items():
-            quota = max(1, round(limit * weights[key] / total_weight))
-            quota = min(quota, len(cell_items))
-            sample.extend(rng.sample(cell_items, quota))
-
-        # Trim/pad to exactly `limit` from the remaining pool, randomly.
-        rng.shuffle(sample)
-        if len(sample) > limit:
-            sample = sample[:limit]
-        elif len(sample) < limit:
-            chosen = {id(x) for x in sample}
-            remaining = [it for it in items if id(it) not in chosen]
-            rng.shuffle(remaining)
-            sample.extend(remaining[: limit - len(sample)])
-        items = sample
-
-    result = []
-    for i, it in enumerate(items):
-        context = _lb_head_tail(it["context"])
-        result.append({
-            "messages": [{"role": "user", "content": context}],
-            "workload": workload_tag,
-            "item_id": it.get("_id", f"lb_{i:04d}"),
-            "question": it["question"],
-            "choice_A": it["choice_A"],
-            "choice_B": it["choice_B"],
-            "choice_C": it["choice_C"],
-            "choice_D": it["choice_D"],
-            "gold": it["answer"],
-            # metadata threaded into records for accuracy breakdown tables
-            "lb_domain": it.get("domain", ""),
-            "lb_difficulty": it.get("difficulty", ""),
-            "lb_length": it.get("length", ""),
-        })
-    return result
-
-
-def _sum_tokens(messages: list[dict]) -> int:
-    from leanctx.tokens import count_tokens
-
-    combined = " ".join(
-        m["content"] if isinstance(m.get("content"), str) else ""
-        for m in messages
-    )
-    return count_tokens(combined)
-
-
-def _build_eval_context(
-    compressed_messages: list[dict],
-    *,
-    closed_book: bool = False,
-) -> str:
-    """Assemble the ``$DOC$`` context string the eval prompt is built from.
-
-    Factored out of ``call_eval_llm`` so ``run_leg`` can compute the *same*
-    string as a cache key for the shared-eval-draw optimisation: two legs whose
-    compressed messages yield an identical context are guaranteed to send an
-    identical prompt to the judge, so the second leg can reuse the first leg's
-    answer instead of drawing a fresh (and, at temperature > 0, noisy) sample.
-    """
-    if closed_book:
-        return "[no document provided]"
-    return _lb_head_tail(
-        " ".join(
-            m["content"]
-            for m in compressed_messages
-            if isinstance(m.get("content"), str)
-            and m.get("role") in ("user", "system", "assistant")
-        ).strip()
-    )
-
-
-# Eval decoding temperature. LongBench scoring is a single-letter multiple-choice
-# task; we want the judge as close to deterministic as practical so that the
-# per-item accuracy signal reflects the *context* (and thus compression), not
-# decoder sampling. 0.1 (rather than 0.0) keeps a hair of slack for providers
-# that treat exactly-0 specially, while collapsing the ~20% identical-input flip
-# rate observed at the API default of 1.0.
-_EVAL_TEMPERATURE = 0.1
-
-
-def call_eval_llm(
-    compressed_messages: list[dict],
-    item: dict,
-    eval_cfg: dict,
-    *,
-    closed_book: bool = False,
-) -> tuple[str | None, int]:
-    """Build an LB prompt from compressed messages + item; call the eval LLM.
-
-    When ``closed_book`` is True the document context is dropped entirely and
-    the model must answer from priors alone — the control leg that rules out
-    the null hypothesis "the context was irrelevant" (see reviewer feedback).
-
-    Returns (predicted_letter | None, input_tokens).
-    """
-    context = _build_eval_context(compressed_messages, closed_book=closed_book)
-    prompt = _build_lb_prompt(item, context)
-
-    provider = eval_cfg.get("provider", "anthropic")
-    model = eval_cfg.get("model", "claude-sonnet-4-6")
-    max_tokens = int(eval_cfg.get("max_tokens", 64))
-
-    max_retries = 8
-    for attempt in range(max_retries):
-        try:
-            if provider == "anthropic":
-                import anthropic
-
-                client = anthropic.Anthropic()
-                resp = client.messages.create(
-                    model=model,
-                    max_tokens=max_tokens,
-                    temperature=_EVAL_TEMPERATURE,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                text = resp.content[0].text if resp.content else ""
-                in_tok = int(resp.usage.input_tokens)
-            elif provider == "openai":
-                import openai
-
-                client = openai.OpenAI()
-                resp = client.chat.completions.create(
-                    model=model,
-                    max_tokens=max_tokens,
-                    temperature=_EVAL_TEMPERATURE,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                text = resp.choices[0].message.content or ""
-                in_tok = int(resp.usage.prompt_tokens) if resp.usage else 0
-            else:
-                raise ValueError(f"Unsupported eval provider: {provider!r}")
-            break  # success
-        except Exception as exc:
-            is_rate_limit = "rate_limit" in type(exc).__name__.lower() or "429" in str(exc)
-            if is_rate_limit and attempt < max_retries - 1:
-                wait = min(2 ** attempt * 15, 120)  # 15s, 30s, 60s, 120s…
-                print(f"  [rate-limit] waiting {wait}s before retry {attempt + 2}/{max_retries}")
-                time.sleep(wait)
-            else:
-                raise
-
-    return _extract_lb_answer(text), in_tok
-
-
 def run_leg(
     leg: str,
     items: list[dict[str, Any]],
@@ -1375,92 +352,29 @@ def run_leg(
     reuse_eval: dict[str, dict[str, Any]] | None = None,
     eval_sink: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Run one benchmark leg.
+    """ClawRouter leg runner — back-compat wrapper over the generic
+    ``benchmarks.common.runner.run_leg``.
 
-    Shared eval draw (de-biasing): when ``reuse_eval`` is supplied (the prior
-    leg's ``eval_sink``) and this item's eval context is byte-identical to the
-    context the prior leg scored, the prior leg's answer is reused verbatim
-    instead of issuing a fresh judge call. This makes verbatim-routed items —
-    where leanctx changed nothing — contribute Δacc = 0 by construction, instead
-    of injecting decoder noise. ``eval_sink`` records this leg's (context,
-    answer, tokens) per item so a later leg can reuse them.
+    Binds the CR-shim compressor (``compress_via_shim`` at ``shim_url``) and the
+    module-level ``call_eval_llm`` (so the methodology tests can monkeypatch
+    ``harness.compress_via_shim`` / ``harness.call_eval_llm``). The generic
+    runner owns the scoring + shared-eval-draw logic; this keeps the historical
+    ``run_leg(leg, items, shim_url, lb_cfg, …)`` signature.
     """
-    records = []
-    for item in items:
-        t0 = time.perf_counter()
-        messages = item["messages"]
-        tokens_raw = _sum_tokens(messages)
-        if closed_book:
-            # The control leg drops the document entirely, so there is nothing
-            # to compress and no shim is needed — skip it to avoid depending on
-            # a live sidecar/shim and to keep the leg cheap.
-            compressed = messages
-            compress_ms = 0
-            shim_result = {}
-        else:
-            # Time the compression sidecar call in isolation. The reviewer
-            # flagged that an end-to-end duration_ms wraps the eval LLM (and its
-            # retries), so it cannot stand in for Layer 8 latency — compress_ms
-            # is the real sidecar cost, eval_ms is reported separately and
-            # never conflated.
-            t_compress0 = time.perf_counter()
-            shim_result = compress_via_shim(messages, shim_url)
-            compress_ms = int((time.perf_counter() - t_compress0) * 1000)
-            compressed = shim_result["messages"]
-        tokens_compressed = _sum_tokens(compressed)
-        # Retain the compressed messages for the post-run verbatim split
-        # (Phase B). Keyed by item_id; agent items without an id are skipped.
-        item_id = item.get("item_id")
-        if msg_sink is not None and item_id is not None:
-            msg_sink[item_id] = compressed
-        rec: dict[str, Any] = {
-            "leg": leg,
-            "workload": item.get("workload", "unknown"),
-            "item_id": item.get("item_id"),
-            "tokens_raw": tokens_raw,
-            "tokens_compressed": tokens_compressed,
-            "cr_compression_ratio": shim_result.get("compressionRatio"),
-            "cr_stats": shim_result.get("stats"),
-            "compress_ms": compress_ms,
-            "closed_book": closed_book,
-            "accuracy": None,
-        }
-        if lb_cfg and item.get("question"):
-            context_key = _build_eval_context(compressed, closed_book=closed_book)
-            prev = (
-                reuse_eval.get(item_id)
-                if reuse_eval is not None and item_id is not None
-                else None
-            )
-            if prev is not None and prev.get("context") == context_key:
-                # Identical prompt to the prior leg → reuse its draw (no judge
-                # call, no decoder noise). eval_ms is 0 because nothing ran.
-                answer, in_tok = prev["answer"], prev["in_tok"]
-                rec["eval_ms"] = 0
-                rec["eval_reused"] = True
-            else:
-                t_eval0 = time.perf_counter()
-                answer, in_tok = call_eval_llm(
-                    compressed, item, lb_cfg, closed_book=closed_book
-                )
-                rec["eval_ms"] = int((time.perf_counter() - t_eval0) * 1000)
-                rec["eval_reused"] = False
-            rec["accuracy"] = answer == item.get("gold")
-            rec["lb_gold"] = item.get("gold")
-            rec["lb_pred"] = answer
-            rec["eval_input_tokens"] = in_tok
-            rec["lb_domain"] = item.get("lb_domain", "")
-            rec["lb_difficulty"] = item.get("lb_difficulty", "")
-            rec["lb_length"] = item.get("lb_length", "")
-            if eval_sink is not None and item_id is not None:
-                eval_sink[item_id] = {
-                    "context": context_key,
-                    "answer": answer,
-                    "in_tok": in_tok,
-                }
-        rec["duration_ms"] = int((time.perf_counter() - t0) * 1000)
-        records.append(rec)
-    return records
+    def _compress(messages: list[dict]) -> dict[str, Any]:
+        return compress_via_shim(messages, shim_url)
+
+    return _runner_run_leg(
+        leg,
+        items,
+        compress=_compress,
+        lb_cfg=lb_cfg,
+        eval_fn=call_eval_llm,
+        closed_book=closed_book,
+        msg_sink=msg_sink,
+        reuse_eval=reuse_eval,
+        eval_sink=eval_sink,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

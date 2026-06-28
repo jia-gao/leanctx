@@ -20,6 +20,7 @@ class ContentType(str, Enum):
     PROSE = "prose"
     CODE = "code"
     ERROR = "error"
+    STRUCTURED = "structured"
     REPEAT = "repeat"
     LONG_IMPORTANT = "long_important"
 

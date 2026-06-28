@@ -560,6 +560,28 @@ def test_verbatim_split_item_code_is_verbatim():
     assert route == "verbatim"
 
 
+# A JSON blob long/dense enough to classify as ContentType.STRUCTURED.
+_STRUCTURED = '{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7}' * 20
+
+
+@pytest.mark.unit
+def test_verbatim_split_item_structured_is_compressed():
+    """Regression guard: structured data is routed to the (gentler) lingua pass
+    by the middleware, so the split must book it as *compressed* — not verbatim.
+    If a new compressed ContentType is omitted here, the route label drifts from
+    the sidecar and the route/reuse invariant trips at run time (exit 3)."""
+    from leanctx.classifier import classify
+    from leanctx.compressors import ContentType
+
+    assert classify(_msg(_STRUCTURED)) is ContentType.STRUCTURED  # fixture sanity
+    a = [_msg(_STRUCTURED)]
+    b = [_msg('{"a": 1, "b": 2}')]  # pretend-gently-compressed (fewer tokens)
+    v, c_in, c_out, route = _verbatim_split_item(a, b, threshold=10)
+    assert v == 0
+    assert c_in == _sum_tokens(a) and c_out == _sum_tokens(b)
+    assert route == "lingua"
+
+
 @pytest.mark.unit
 def test_verbatim_split_item_below_threshold_all_verbatim():
     """A request under the token gate is passed through → everything verbatim."""

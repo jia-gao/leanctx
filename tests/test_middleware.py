@@ -125,3 +125,63 @@ def test_stats_uses_passthrough_for_off_mode() -> None:
     )
     assert isinstance(stats, CompressionStats)
     assert stats.method == "passthrough"
+
+
+# --------------------------------------------------------------------------- #
+# Structured-data routing — gentler lingua ratio than prose
+# --------------------------------------------------------------------------- #
+
+
+def test_structured_auto_routes_to_gentle_lingua() -> None:
+    # When prose→lingua, structured data is auto-routed to a gentler keep-ratio
+    # (0.8) than the prose pass (0.5) — thinned, not shredded.
+    from leanctx.compressors import ContentType
+
+    mw = Middleware({"mode": "on", "routing": {"prose": "lingua"}})
+    structured = mw._router.route(ContentType.STRUCTURED)
+    prose = mw._router.route(ContentType.PROSE)
+    assert structured.name == "lingua" and prose.name == "lingua"
+    assert structured.ratio == 0.8
+    assert prose.ratio == 0.5
+
+
+def test_structured_ratio_is_configurable() -> None:
+    from leanctx.compressors import ContentType
+
+    mw = Middleware({
+        "mode": "on",
+        "routing": {"prose": "lingua"},
+        "lingua": {"ratio": 0.5, "structured_ratio": 0.7},
+    })
+    assert mw._router.route(ContentType.STRUCTURED).ratio == 0.7
+
+
+def test_structured_explicit_verbatim_opts_out() -> None:
+    # An explicit routing entry wins over the auto gentle-lingua default.
+    from leanctx.compressors import ContentType
+
+    mw = Middleware({
+        "mode": "on",
+        "routing": {"prose": "lingua", "structured": "verbatim"},
+    })
+    assert mw._router.route(ContentType.STRUCTURED).name == "verbatim"
+
+
+def test_structured_explicit_lingua_uses_prose_ratio() -> None:
+    # Explicit structured→lingua takes the prose ratio, not the gentle default.
+    from leanctx.compressors import ContentType
+
+    mw = Middleware({
+        "mode": "on",
+        "routing": {"prose": "lingua", "structured": "lingua"},
+        "lingua": {"ratio": 0.5},
+    })
+    assert mw._router.route(ContentType.STRUCTURED).ratio == 0.5
+
+
+def test_structured_stays_verbatim_without_lingua() -> None:
+    # No lingua in play ⇒ structured falls back to the Verbatim default (safe).
+    from leanctx.compressors import ContentType
+
+    mw = Middleware({"mode": "on", "routing": {"code": "verbatim"}})
+    assert mw._router.route(ContentType.STRUCTURED).name == "verbatim"

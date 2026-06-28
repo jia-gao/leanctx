@@ -40,6 +40,13 @@ _log = logging.getLogger(__name__)
 
 _DEFAULT_THRESHOLD_TOKENS = 2000
 
+# Keep-ratio for structured data (JSON/dialogue logs) when it is routed through
+# the extractive lingua pass. Gentler than the prose default (0.5) because
+# structured content shreds under aggressive token-dropping — keeping ~80%
+# thins it while leaving its braces/keys/values mostly intact. Override per
+# call via ``config["lingua"]["structured_ratio"]``.
+_STRUCTURED_LINGUA_RATIO = 0.8
+
 # Factories for Compressor names that appear in routing config. Each
 # factory accepts a per-compressor config dict (e.g. config["lingua"])
 # and an ObservabilityConfig, and returns an instance.
@@ -221,6 +228,24 @@ class Middleware:
                 continue
             compressor_cfg = config.get(compressor_name) or {}
             router.register(ctype, factory(compressor_cfg, self._observability))
+
+        # Auto-route structured data to a *gentler* lingua pass whenever lingua
+        # is the prose compressor and the caller hasn't routed `structured`
+        # explicitly. The classifier sends JSON/dialogue logs here precisely
+        # because the default-ratio prose pass shreds them; a higher keep-ratio
+        # thins them without destroying structure. Opt out with an explicit
+        # routing entry, e.g. {"structured": "verbatim"} (full preservation) or
+        # {"structured": "lingua"} (prose ratio). Unmapped + no lingua ⇒ the
+        # Verbatim default still applies, so structured is never corrupted.
+        if "structured" not in routing and routing.get("prose") == "lingua":
+            lingua_cfg = dict(config.get("lingua") or {})
+            lingua_cfg["ratio"] = lingua_cfg.get(
+                "structured_ratio", _STRUCTURED_LINGUA_RATIO
+            )
+            router.register(
+                ContentType.STRUCTURED,
+                _COMPRESSOR_FACTORIES["lingua"](lingua_cfg, self._observability),
+            )
         return router
 
     def _build_strategies(self, config: dict[str, Any]) -> list[Strategy]:

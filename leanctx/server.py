@@ -67,6 +67,7 @@ def _default_config() -> dict[str, Any]:
         LEANCTX_SERVER_THRESHOLD     int tokens          (default: 1500)
         LEANCTX_SERVER_ROUTING       json object         (default: {"prose":"lingua"})
         LEANCTX_SERVER_LINGUA_RATIO  float 0..1           (default: 0.5)
+        LEANCTX_SERVER_STRUCTURED_RATIO float 0..1        (default: 0.8, gentler)
         LEANCTX_SERVER_LINGUA_DEVICE cpu|cuda|mps|''      (default: auto)
         LEANCTX_SERVER_DEDUP         on | off            (default: off)
         LEANCTX_SERVER_CONFIG        full json config (wins over the above)
@@ -83,6 +84,7 @@ def _default_config() -> dict[str, Any]:
     routing_raw = os.environ.get("LEANCTX_SERVER_ROUTING")
     routing = json.loads(routing_raw) if routing_raw else {"prose": "lingua"}
     ratio = float(os.environ.get("LEANCTX_SERVER_LINGUA_RATIO", "0.5"))
+    structured_ratio = float(os.environ.get("LEANCTX_SERVER_STRUCTURED_RATIO", "0.8"))
     device_env = os.environ.get("LEANCTX_SERVER_LINGUA_DEVICE", "")
     device = device_env or None
     dedup = os.environ.get("LEANCTX_SERVER_DEDUP", "off").lower() in ("on", "true", "1")
@@ -91,7 +93,7 @@ def _default_config() -> dict[str, Any]:
         "mode": mode,
         "trigger": {"threshold_tokens": threshold},
         "routing": routing,
-        "lingua": {"ratio": ratio, "device": device},
+        "lingua": {"ratio": ratio, "structured_ratio": structured_ratio, "device": device},
         "strategies": {"dedup": dedup, "purge_errors": False},
     }
 

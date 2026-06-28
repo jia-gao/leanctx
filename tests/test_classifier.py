@@ -69,6 +69,61 @@ def test_plain_prose_is_prose() -> None:
     assert classify(msg) == ContentType.PROSE
 
 
+# --------------------------------------------------------------------------- #
+# Structured-data detection (route JSON to verbatim, never the lossy prose pass)
+# --------------------------------------------------------------------------- #
+
+
+def test_json_dialogue_blob_is_structured() -> None:
+    # A serialized session/dialogue log — the LongBench shape LLMLingua-2 shreds.
+    blob = (
+        '{"meta": {"name": "bar_game", "rounds": 10}, "records": ['
+        + ", ".join(
+            f'{{"round_id": {i}, "responses": "go", "go_num": {i % 3}, '
+            f'"winner": "stay", "utility": {i * 2}}}'
+            for i in range(40)
+        )
+        + "]}"
+    )
+    assert len(blob) >= 200
+    assert classify({"role": "user", "content": blob}) == ContentType.STRUCTURED
+
+
+def test_long_prose_is_not_structured() -> None:
+    # Well over the min length but no JSON keys → stays prose (compressible).
+    prose = (
+        "The quarterly review covered customer retention, onboarding friction, "
+        "and the roadmap for the next two releases. Several teams raised concerns "
+        "about latency under load, and we agreed to revisit the caching strategy "
+        "before the launch. Nothing here is structured data; it is ordinary text."
+    )
+    assert len(prose) >= 200
+    assert classify({"role": "user", "content": prose}) == ContentType.PROSE
+
+
+def test_short_json_snippet_is_not_structured() -> None:
+    # Below the min-length guard: too short to trust the density estimate.
+    msg = {"role": "user", "content": '{"ok": true, "n": 3}'}
+    assert classify(msg) != ContentType.STRUCTURED
+
+
+def test_code_wins_over_structured() -> None:
+    # A fenced JSON block is still CODE — both route to verbatim, but the CODE
+    # check precedes STRUCTURED, so the established ordering is preserved.
+    fenced = '```json\n' + '{"a": 1, "b": 2, "c": 3}\n' * 20 + '```'
+    assert classify({"role": "user", "content": fenced}) == ContentType.CODE
+
+
+def test_structured_routes_to_verbatim_by_default() -> None:
+    # The default Router maps only prose→lingua; STRUCTURED is unmapped and so
+    # falls back to the Verbatim default — content is never corrupted.
+    from leanctx.compressors import Verbatim
+    from leanctx.router import Router
+
+    router = Router(default=Verbatim())
+    assert router.route(ContentType.STRUCTURED).name == Verbatim().name
+
+
 def test_empty_content_is_unknown() -> None:
     assert classify({"role": "user", "content": ""}) == ContentType.UNKNOWN
 
