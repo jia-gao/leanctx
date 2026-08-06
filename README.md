@@ -1,5 +1,9 @@
 # leanctx
 
+[![PyPI](https://img.shields.io/pypi/v/leanctx)](https://pypi.org/project/leanctx/)
+[![Python](https://img.shields.io/pypi/pyversions/leanctx)](https://pypi.org/project/leanctx/)
+[![License](https://img.shields.io/pypi/l/leanctx)](LICENSE)
+
 **Drop-in prompt compression for production LLM applications.**
 Cut your input-token bill by 40–60% — without changing your code.
 
@@ -13,9 +17,44 @@ from leanctx import OpenAI  # same interface, compressed requests
 
 On the public **[LongBench v2](https://longbench2.github.io/)** leaderboard's short subset, leanctx-Lingua **doubles accuracy** versus naive head+tail truncation (40 % vs 20 %) while removing **57 % of tokens**. Open-source models, runs locally, MIT-licensed. Your prompts and user data never leave your infrastructure by default.
 
-[![PyPI](https://img.shields.io/pypi/v/leanctx)](https://pypi.org/project/leanctx/)
-[![Python](https://img.shields.io/pypi/pyversions/leanctx)](https://pypi.org/project/leanctx/)
-[![License](https://img.shields.io/pypi/l/leanctx)](LICENSE)
+[Quickstart](#quickstart-60-seconds) · [What makes it different](#what-makes-it-different) · [Benchmarks](#real-numbers) · [Used in production](#used-in-production) · [How it works](#how-it-works)
+
+---
+
+## What makes it different
+
+**Loss-tolerance routing** — classify every segment of a prompt by how much
+distortion it can survive, then compress each class differently.
+
+```mermaid
+flowchart TD
+    A["Agent request"] --> B["Classify by loss tolerance"]
+    B -->|zero tolerance| C["Verbatim<br/>byte for byte"]
+    B -->|high tolerance| D["LLMLingua-2<br/>~50% removed"]
+    B -->|opt-in| E["Self-LLM"]
+    C --> F["Recompose + check invariants"]
+    D --> F
+    E --> F
+    F -->|hold| G["Compressed → provider"]
+    F -->|fail or timeout| H["Original → provider"]
+
+    classDef zero fill:#e8f1fd,stroke:#2a78d6,color:#0b0b0b
+    classDef high fill:#e9f4f0,stroke:#1baf7a,color:#0b0b0b
+    classDef open fill:#f4f4f1,stroke:#898781,color:#0b0b0b
+    class C zero
+    class D high
+    class H open
+```
+
+| Class | Content | Treatment | Effect |
+|---|---|---|---|
+| **Zero tolerance** | code, stack traces, `tool_use_id`, tool name and input, JSON | verbatim | 0 % altered |
+| **High tolerance** | documentation, retrieved passages, logs, prior turns | LLMLingua-2, on-device | ~50 % removed |
+| **Conditional** | low-confidence prose, oversized context | self-LLM, opt-in | 41–49 % removed |
+
+Compression applied uniformly to a prompt will eventually damage the one part that
+cannot survive being touched, and will do so unpredictably. The hard part is not
+shortening text — it is deciding, inside a live request, what may be shortened at all.
 
 ---
 
@@ -119,9 +158,35 @@ All three preserved every timestamp, metric value, and action item with no hallu
 
 Full methodology, per-provider output samples, cost analysis, bugs found in flight: [`docs/benchmarks/`](docs/benchmarks/).
 
+## Used in production
+
+leanctx runs in production at companies unaffiliated with this project:
+
+| Company | Where | Notes |
+|---|---|---|
+| **[InsForge](https://github.com/InsForge/InsForge)** (Y Combinator P26) | Model Gateway compression path | Agent-native backend platform, Apache-2.0. Runs leanctx as an HTTP sidecar in front of the provider call — default-off, fail-open. See [`integrations/insforge/`](integrations/insforge/) |
+| **BlockRunAI** | ClawRouter | Co-published benchmark. See [`integrations/clawrouter/`](integrations/clawrouter/) |
+
+Running leanctx in production and want to be listed? Open an issue.
+
 ## How it works
 
-leanctx wraps your existing SDK call and applies a configurable compression pipeline before the request hits the wire.
+### Invariants
+
+Checked after recompose, before the request goes upstream:
+
+- message count and ordering match the input
+- every `tool_use_id`, tool name and tool input unchanged
+- code and stack traces inside tool results byte-identical
+- compression path responded within its timeout
+
+**Any failure sends the original uncompressed request.** Fails open: a compression
+outage costs savings, never availability.
+
+### The pipeline
+
+leanctx wraps your existing SDK call and applies a configurable compression pipeline
+before the request hits the wire.
 
 ```
 your code
