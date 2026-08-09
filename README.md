@@ -188,14 +188,13 @@ Full methodology, per-provider output samples, cost analysis, bugs found in flig
 
 ## Integrations
 
-Deployable integrations against two third-party stacks, each with a working sidecar, a connector, and a measurement harness. Status is stated precisely — nothing here is claimed as a production deployment.
+Deployable integrations against third-party stacks, each with a working sidecar, a connector, and a measurement harness.
 
-| Stack | What exists | Measured | Upstream status |
-|---|---|---|---|
-| **[ClawRouter](https://github.com/BlockRunAI/ClawRouter)** (BlockRunAI) | "Layer 8" sidecar + TypeScript connector — [`integrations/clawrouter/`](integrations/clawrouter/) | ✅ Full N=503 sweep, PASS on both gates ([report](benchmarks/clawrouter/full_long_bench_evaluation_result.md)) | Not upstreamed — integration lives here |
-| **[InsForge](https://github.com/InsForge/InsForge)** (Y Combinator P26) | Model Gateway sidecar + connector — [`integrations/insforge/`](integrations/insforge/) | Harness built ([`benchmarks/insforge/`](benchmarks/insforge/)); no published run yet | [PR #1569](https://github.com/InsForge/InsForge/pull/1569) opened, then withdrawn by me pending a design sync on the gateway request path |
+| Stack | What exists | Measured |
+|---|---|---|
+| **[ClawRouter](https://github.com/BlockRunAI/ClawRouter)** (BlockRunAI) | "Layer 8" sidecar + TypeScript connector — [`integrations/clawrouter/`](integrations/clawrouter/) | ✅ Full N=503 sweep, PASS on both gates ([report](benchmarks/clawrouter/full_long_bench_evaluation_result.md)) |
 
-Both integrations are opt-in and fail-open by construction: if the sidecar is unreachable, slow, or returns anything that fails the invariant check, the original uncompressed request goes upstream. A compression outage costs savings, never availability.
+Integrations are opt-in and fail-open by construction: if the sidecar is unreachable, slow, or returns anything that fails the invariant check, the original uncompressed request goes upstream. A compression outage costs savings, never availability.
 
 Running leanctx against your stack? Open an issue — measured results get listed here.
 
