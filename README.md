@@ -135,7 +135,7 @@ Full report — per-bucket breakdowns by route × difficulty × length × domain
 
 #### Independent execution and audit
 
-This result was not self-reported. The benchmark was run by an outside contributor ([@YingjingLu](https://github.com/YingjingLu), Carnegie Mellon), and an earlier draft was independently audited by [@QianXiaoMoRan9](https://github.com/QianXiaoMoRan9), who showed that a headline "+7.4 % on long context" was **eval noise rather than a compression effect** — 7 of the 8 net improved items came from the verbatim subset, where the input was byte-identical (McNemar p = 0.143). Two methodology fixes followed ([#7](https://github.com/jia-gao/leanctx/pull/7)): Leg B now reuses Leg A's answer whenever the compressed context is byte-identical, so verbatim items contribute Δ = 0 by construction instead of decoder noise, and eval temperature dropped to 0.1. A separate correction forced a letter choice in the closed-book control, which had been scoring 6 % — below the 25 % random floor for 4-way multiple choice — and inflating apparent context lift.
+This result was not produced by the maintainer. The benchmark was executed and audited by outside contributors ([@YingjingLu](https://github.com/YingjingLu), [@QianXiaoMoRan9](https://github.com/QianXiaoMoRan9)). An audit of an earlier draft showed that a headline "+7.4 % on long context" was **eval noise rather than a compression effect** — 7 of the 8 net improved items came from the verbatim subset, where the input was byte-identical (McNemar p = 0.143). Two methodology fixes followed ([#7](https://github.com/jia-gao/leanctx/pull/7)): Leg B now reuses Leg A's answer whenever the compressed context is byte-identical, so verbatim items contribute Δ = 0 by construction instead of decoder noise, and eval temperature dropped to 0.1. A separate correction forced a letter choice in the closed-book control, which had been scoring 6 % — below the 25 % random floor for 4-way multiple choice — and inflating apparent context lift.
 
 The numbers above are post-correction. Discussion: [issue #3](https://github.com/jia-gao/leanctx/issues/3).
 
@@ -356,7 +356,7 @@ docker build -t leanctx:lingua --build-arg LINGUA=true .   # + LLMLingua-2, ~3 G
 - [x] **v0.1** — Python SDK, drop-in wrappers, LLMLingua-2 + SelfLLM (Anthropic), classifier, router, dedup + purge-errors strategies, LangChain helpers, Docker
 - [x] **v0.2** — SelfLLM on OpenAI + Gemini, block-aware compression (tool_use / tool_result preserved), Gemini contents normalization, LCEL `compress_runnable`
 - [x] **v0.3** — OpenTelemetry observability across 12 wrapper paths, `leanctx bench` CLI (6 scenarios + versioned schema), `agent-structural` invariant enforcement, [public release `v0.3.1`](https://pypi.org/project/leanctx/) — 2026-04-26
-- [x] **Full 503-item LongBench v2 sweep** — run, independently audited, methodology corrected, [published](benchmarks/clawrouter/full_long_bench_evaluation_result.md) — 2026-06-13
+- [x] **Full 503-item LongBench v2 sweep** — externally run and audited, methodology corrected, [published](benchmarks/clawrouter/full_long_bench_evaluation_result.md) — 2026-06-13
 - [ ] **v0.3.x** — ghcr.io Docker publish, OpenAI Responses-API intercept, multimodal + function-call compression for Gemini, LlamaIndex helpers, TypeScript SDK compression port
 - [ ] **v0.4** — per-tenant attribution (with cardinality cap), Helm chart / K8s sidecar, stateful session dedup with explicit session IDs
 
