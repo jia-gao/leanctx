@@ -426,6 +426,15 @@ def main(argv: list[str] | None = None) -> int:
                         default=True,
                         help="Run the no-context control leg (default: on).")
     parser.add_argument("--no-closed-book", dest="closed_book", action="store_false")
+    parser.add_argument(
+        "--no-eval", dest="no_eval", action="store_true",
+        help="Savings-only run: skip every judge call and the closed-book "
+             "control. Token accounting (tokens_raw/tokens_compressed and the "
+             "lx_* verbatim split) comes from the compression step alone, so "
+             "the savings figures are unaffected — only accuracy is omitted. "
+             "Costs zero API spend; use to regenerate the savings record "
+             "without re-running the (expensive) accuracy legs.",
+    )
     parser.add_argument("--out", type=Path, default=Path("./phase1_results.jsonl"))
     parser.add_argument("--report", type=Path, default=Path("./phase1_report.md"))
     parser.add_argument(
@@ -457,11 +466,19 @@ def main(argv: list[str] | None = None) -> int:
 
     workdir = args.workdir
     sidecar_url = args.sidecar_url
-    eval_cfg: dict[str, Any] = {
+    eval_cfg: dict[str, Any] | None = {
         "provider": args.eval_provider,
         "model": args.eval_model,
         "max_tokens": 1024,
     }
+    if args.no_eval:
+        # run_leg issues a judge call only under `if lb_cfg and item["question"]`,
+        # so dropping the config is what makes this a zero-API run. The closed-
+        # book control is pure eval, so it goes too.
+        eval_cfg = None
+        args.closed_book = False
+        print("[no-eval] Savings-only run: no judge calls, no closed-book leg. "
+              "Accuracy fields will be null; token accounting is unaffected.")
 
     # ── Phase A: Setup ────────────────────────────────────────────────────
     already_built = (workdir / "dist" / "compression" / "index.js").exists()

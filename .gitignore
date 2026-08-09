@@ -66,5 +66,8 @@ docs/research/
 bench-results/
 research/
 CLAUDE.md
-benchmarks/clawrouter/results/
-benchmarks/insforge/results/
+benchmarks/clawrouter/results/*
+benchmarks/insforge/results/*
+# ...except the canonical full-N records behind the published report — the
+# headline N=503 claim should be checkable against the data that produced it.
+!benchmarks/clawrouter/results/full503_phase1_results.jsonl

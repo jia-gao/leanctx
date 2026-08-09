@@ -363,6 +363,17 @@ def run_leg(
             "closed_book": closed_book,
             "accuracy": None,
         }
+        if item.get("question"):
+            # LongBench metadata describes the *item*, not the judge, so record
+            # it whether or not an eval leg runs. A savings-only run
+            # (``lb_cfg=None``) still has to slice savings by length / domain /
+            # difficulty, and those slices are unavailable if this rides inside
+            # the eval branch below.
+            rec["lb_gold"] = item.get("gold")
+            rec["lb_domain"] = item.get("lb_domain", "")
+            rec["lb_difficulty"] = item.get("lb_difficulty", "")
+            rec["lb_length"] = item.get("lb_length", "")
+
         if lb_cfg and item.get("question"):
             context_key = _build_eval_context(compressed, closed_book=closed_book)
             prev = (
@@ -384,15 +395,11 @@ def run_leg(
                 rec["eval_ms"] = int((time.perf_counter() - t_eval0) * 1000)
                 rec["eval_reused"] = False
             rec["accuracy"] = answer == item.get("gold")
-            rec["lb_gold"] = item.get("gold")
             rec["lb_pred"] = answer
             rec["eval_input_tokens"] = in_tok
             # The provider's own usage.prompt_tokens — the InsForge headline
             # instrument. Identical to eval_input_tokens for LB items.
             rec["usage_prompt_tokens"] = in_tok
-            rec["lb_domain"] = item.get("lb_domain", "")
-            rec["lb_difficulty"] = item.get("lb_difficulty", "")
-            rec["lb_length"] = item.get("lb_length", "")
             if eval_sink is not None and item_id is not None:
                 eval_sink[item_id] = {
                     "context": context_key,
