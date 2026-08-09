@@ -22,7 +22,7 @@ This integration has two parts:
 | Part | What | Status |
 |------|------|--------|
 | **P2a — sidecar package** | The Dockerized leanctx service here. The thing ClawRouter calls. | **here now** |
-| **P2b — ClawRouter connector** | The ClawRouter-side hook that POSTs to the sidecar after Layer 7 and splices the result back. | coming |
+| **P2b — ClawRouter connector** | The ClawRouter-side hook that POSTs to the sidecar after Layer 7 and splices the result back. | **here now** — [`connector/`](connector/) |
 
 > This is the *serving* sidecar. It differs from the repo-root [`Dockerfile`](../../Dockerfile),
 > which is a base image that just pre-installs leanctx — this one **runs** `leanctx-serve`

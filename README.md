@@ -15,9 +15,9 @@ from openai import OpenAI
 from leanctx import OpenAI  # same interface, compressed requests
 ```
 
-On the public **[LongBench v2](https://longbench2.github.io/)** leaderboard's short subset, leanctx-Lingua **doubles accuracy** versus naive head+tail truncation (40 % vs 20 %) while removing **57 % of tokens**. Open-source models, runs locally, MIT-licensed. Your prompts and user data never leave your infrastructure by default.
+Measured on the full **[LongBench v2](https://longbench2.github.io/)** set (N=503), layered on top of an existing production compressor: **24.1 % additional tokens removed for 1.8 pp of accuracy** — 47 ms p50. Open-source models, runs locally, MIT-licensed. Your prompts and user data never leave your infrastructure by default.
 
-[Quickstart](#quickstart-60-seconds) · [What makes it different](#what-makes-it-different) · [Benchmarks](#real-numbers) · [Used in production](#used-in-production) · [How it works](#how-it-works)
+[Quickstart](#quickstart-60-seconds) · [What makes it different](#what-makes-it-different) · [Benchmarks](#real-numbers) · [Integrations](#integrations) · [How it works](#how-it-works)
 
 ---
 
@@ -111,9 +111,37 @@ Existing options have gaps:
 
 ## Real numbers
 
-### Public benchmark — LongBench v2 (Tsinghua KEG, 503 questions, 8K–2M words)
+### Full LongBench v2 sweep — N=503, layered on a production compressor
 
-15-item short-subset ablation, Claude Haiku 4.5 eval, 20K head+tail truncation cap (rate-limit-friendly). Same model, same questions, same truncation across all three conditions — so the comparison is apples-to-apples. Full 503-item sweep is on the v0.3.x roadmap.
+The headline result. leanctx runs as a semantic pass **on top of** [ClawRouter](https://github.com/BlockRunAI/ClawRouter)'s seven structural compression layers, so the measured delta is what leanctx adds to a system that is *already* compressing. All 503 LongBench v2 questions (Tsinghua KEG, 8K–2M words), Claude Haiku 4.5 eval, temperature 0.1.
+
+| | Avg tokens / request | vs raw | vs Leg A |
+|---|---:|---:|---:|
+| Raw (uncompressed) | 27,810 | — | — |
+| Leg A — ClawRouter's 7 structural layers | 26,345 | −5.3 % | — |
+| **Leg B — + leanctx Layer 8** | **19,983** | **−28.1 %** | **−24.1 %** |
+
+| Accuracy | N | Leg A | Leg B | Δ |
+|---|---:|---:|---:|---:|
+| Overall | 503 | 45.3 % | 43.5 % | **−1.8 pp** |
+| ↳ `verbatim`-routed (leanctx changed nothing) | 275 | 46.9 % | 46.9 % | 0.0 pp |
+| ↳ `lingua`-routed (leanctx compressed) | 228 | 43.4 % | 39.5 % | −3.9 pp |
+
+**Read this honestly: compression costs accuracy, it does not add it.** The claim is that the cost is small and bounded — 1.8 pp overall for 24.1 % fewer tokens, against the −2 pp go/no-go gate set for the integration. Because 54.2 % of Layer-8 input tokens route to verbatim, the compression actually applied to eligible content is **52.8 %**; the verbatim half contributes exactly 0 to both the savings and the accuracy delta by construction.
+
+Sub-buckets are not uniform, and the report does not hide them: `short`/`lingua` is −17.6 pp (N=68) and Single-Document QA −11.5 pp (N=78), while Long Structured Data Understanding is +9.4 pp (N=32). Sidecar latency 47 ms p50 / 959 ms p95. At Sonnet input pricing the savings are ~$100 per 1,000 requests.
+
+Full report — per-bucket breakdowns by route × difficulty × length × domain, layer-by-layer contributions, cost model: [`benchmarks/clawrouter/full_long_bench_evaluation_result.md`](benchmarks/clawrouter/full_long_bench_evaluation_result.md).
+
+#### Independent execution and audit
+
+This result was not self-reported. The benchmark was run by an outside contributor ([@YingjingLu](https://github.com/YingjingLu), Carnegie Mellon), and an earlier draft was independently audited by [@QianXiaoMoRan9](https://github.com/QianXiaoMoRan9), who showed that a headline "+7.4 % on long context" was **eval noise rather than a compression effect** — 7 of the 8 net improved items came from the verbatim subset, where the input was byte-identical (McNemar p = 0.143). Two methodology fixes followed ([#7](https://github.com/jia-gao/leanctx/pull/7)): Leg B now reuses Leg A's answer whenever the compressed context is byte-identical, so verbatim items contribute Δ = 0 by construction instead of decoder noise, and eval temperature dropped to 0.1. A separate correction forced a letter choice in the closed-book control, which had been scoring 6 % — below the 25 % random floor for 4-way multiple choice — and inflating apparent context lift.
+
+The numbers above are post-correction. Discussion: [issue #3](https://github.com/jia-gao/leanctx/issues/3).
+
+### Ablation vs naive truncation — 15 items, directional
+
+A separate, much smaller comparison against head+tail truncation at a 20K cap. Same model, same questions, same truncation across all three conditions.
 
 | Method | Accuracy | Tokens kept | Reproduce |
 |---|---:|---:|---|
@@ -121,7 +149,7 @@ Existing options have gaps:
 | **leanctx Lingua** (ratio=0.5) | **40.0 % (6/15)** | **43 %** | `LEANCTX_LBV2_COMPRESSOR=lingua leanctx bench run longbench-v2` |
 | leanctx SelfLLM (Haiku, ratio=0.3) | 26.7 % (4/15) | 1.4 % | `LEANCTX_LBV2_COMPRESSOR=selfllm leanctx bench run longbench-v2` |
 
-Lingua **doubles** the baseline accuracy while removing 57 % of tokens. Naive head+tail truncation drops the middle; Lingua's extractive token classifier keeps answer-bearing tokens distributed across the full document. Per-question records: [`docs/blog/data/lbv2-2026-05-03/`](docs/blog/data/lbv2-2026-05-03/).
+The mechanism is real — truncation drops the middle of the document, while Lingua's extractive classifier keeps answer-bearing tokens distributed across it. **But n=15 is directional only: Fisher's exact two-sided p ≈ 0.18, so this table does not establish the effect.** Treat the N=503 sweep above as the load-bearing result. Per-question records: [`docs/blog/data/lbv2-2026-05-03/`](docs/blog/data/lbv2-2026-05-03/).
 
 ### Internal benchmark — coding-agent transcript
 
@@ -158,16 +186,18 @@ All three preserved every timestamp, metric value, and action item with no hallu
 
 Full methodology, per-provider output samples, cost analysis, bugs found in flight: [`docs/benchmarks/`](docs/benchmarks/).
 
-## Used in production
+## Integrations
 
-leanctx runs in production at companies unaffiliated with this project:
+Deployable integrations against two third-party stacks, each with a working sidecar, a connector, and a measurement harness. Status is stated precisely — nothing here is claimed as a production deployment.
 
-| Company | Where | Notes |
-|---|---|---|
-| **[InsForge](https://github.com/InsForge/InsForge)** (Y Combinator P26) | Model Gateway compression path | Agent-native backend platform, Apache-2.0. Runs leanctx as an HTTP sidecar in front of the provider call — default-off, fail-open. See [`integrations/insforge/`](integrations/insforge/) |
-| **BlockRunAI** | ClawRouter | Co-published benchmark. See [`integrations/clawrouter/`](integrations/clawrouter/) |
+| Stack | What exists | Measured | Upstream status |
+|---|---|---|---|
+| **[ClawRouter](https://github.com/BlockRunAI/ClawRouter)** (BlockRunAI) | "Layer 8" sidecar + TypeScript connector — [`integrations/clawrouter/`](integrations/clawrouter/) | ✅ Full N=503 sweep, PASS on both gates ([report](benchmarks/clawrouter/full_long_bench_evaluation_result.md)) | Not upstreamed — integration lives here |
+| **[InsForge](https://github.com/InsForge/InsForge)** (Y Combinator P26) | Model Gateway sidecar + connector — [`integrations/insforge/`](integrations/insforge/) | Harness built ([`benchmarks/insforge/`](benchmarks/insforge/)); no published run yet | [PR #1569](https://github.com/InsForge/InsForge/pull/1569) opened, then withdrawn by me pending a design sync on the gateway request path |
 
-Running leanctx in production and want to be listed? Open an issue.
+Both integrations are opt-in and fail-open by construction: if the sidecar is unreachable, slow, or returns anything that fails the invariant check, the original uncompressed request goes upstream. A compression outage costs savings, never availability.
+
+Running leanctx against your stack? Open an issue — measured results get listed here.
 
 ## How it works
 
@@ -327,7 +357,8 @@ docker build -t leanctx:lingua --build-arg LINGUA=true .   # + LLMLingua-2, ~3 G
 - [x] **v0.1** — Python SDK, drop-in wrappers, LLMLingua-2 + SelfLLM (Anthropic), classifier, router, dedup + purge-errors strategies, LangChain helpers, Docker
 - [x] **v0.2** — SelfLLM on OpenAI + Gemini, block-aware compression (tool_use / tool_result preserved), Gemini contents normalization, LCEL `compress_runnable`
 - [x] **v0.3** — OpenTelemetry observability across 12 wrapper paths, `leanctx bench` CLI (6 scenarios + versioned schema), `agent-structural` invariant enforcement, [public release `v0.3.1`](https://pypi.org/project/leanctx/) — 2026-04-26
-- [ ] **v0.3.x** — full 503-item LongBench v2 sweep, ghcr.io Docker publish, OpenAI Responses-API intercept, multimodal + function-call compression for Gemini, LlamaIndex helpers, TypeScript SDK compression port
+- [x] **Full 503-item LongBench v2 sweep** — run, independently audited, methodology corrected, [published](benchmarks/clawrouter/full_long_bench_evaluation_result.md) — 2026-06-13
+- [ ] **v0.3.x** — ghcr.io Docker publish, OpenAI Responses-API intercept, multimodal + function-call compression for Gemini, LlamaIndex helpers, TypeScript SDK compression port
 - [ ] **v0.4** — per-tenant attribution (with cardinality cap), Helm chart / K8s sidecar, stateful session dedup with explicit session IDs
 
 ## License
