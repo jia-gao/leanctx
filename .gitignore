@@ -69,5 +69,11 @@ CLAUDE.md
 benchmarks/clawrouter/results/*
 benchmarks/insforge/results/*
 # ...except the canonical full-N records behind the published report — the
-# headline N=503 claim should be checkable against the data that produced it.
+# headline N=503 claim should be checkable against the data that produced it —
+# and the reports generated from them.
 !benchmarks/clawrouter/results/full503_phase1_results.jsonl
+!benchmarks/clawrouter/results/full503_savings_report.md
+!benchmarks/clawrouter/results/short_route_counterfactual.md
+!benchmarks/clawrouter/results/prose_code_savings_curve.md
+!benchmarks/clawrouter/results/prose_code_savings_curve.csv
+!benchmarks/clawrouter/results/prose_code_savings_curve.png

@@ -260,7 +260,7 @@ def write_report(corpus: Corpus, r_lo: float, r_hi: float, png: Path, csvf: Path
     overall_hi = corpus.p0 * r_hi
     out.write_text(f"""# Prose-vs-code savings curve — Method A (full-503 reweight)
 
-**Date:** 2026-06-23 · **Source:** `full503_phase1_results.jsonl` (503 LongBench-v2 Leg-B items)
+**Source:** `full503_phase1_results.jsonl` (503 LongBench-v2 Leg-B items)
 **Method:** reweight existing per-item route splits — **no new benchmark run, no API spend**.
 **Scope:** single axis, prose-share vs code-share. Accuracy is out of scope (LongBench v2 covers it).
 
@@ -278,7 +278,8 @@ blended_savings(p) = p · r        p = prose token-share,  r = {r:.4f}
 
 - **Slope r = {r:.1%}** (per-prose-token savings rate; 95% CI {r_lo:.1%}–{r_hi:.1%}).
 - The full-503 corpus sits at **p₀ = {corpus.p0:.3f}** → **{corpus.overall_savings:.1%}** blended savings
-  (95% CI {overall_lo:.1%}–{overall_hi:.1%}), reproducing the published 24.1% gate number.
+  (95% CI {overall_lo:.1%}–{overall_hi:.1%}). The published run reported 24.1% for this
+  same figure; see `short_route_counterfactual.md` for the per-figure reproduction diff.
 - Because LLMLingua-2 is deterministic, every point on the line is **exact arithmetic**, not an estimate.
 
 ![prose-vs-code savings curve]({png.name})
