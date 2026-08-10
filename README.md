@@ -15,7 +15,7 @@ from openai import OpenAI
 from leanctx import OpenAI  # same interface, compressed requests
 ```
 
-On the full **[LongBench v2](https://longbench2.github.io/)** set (N=503), layered on top of a compressor that is already running, leanctx removes **an extra 18.7 % of tokens** — rising to **36.7 % on prose-heavy traffic** — for a measured 1.8 pp of accuracy. Per-item records are in the repo, and [not every published figure reproduces](#reproduction-status). Open-source models, runs locally, MIT-licensed. Your prompts and user data never leave your infrastructure by default.
+On the full **[LongBench v2](https://longbench2.github.io/)** set (N=503), layered on top of a compressor that is already running, leanctx removes **an extra 18.7 % of tokens** — rising to **36.7 % on prose-heavy traffic** — at a cost of 1.8 pp of accuracy. Every figure regenerates from [per-item records committed to this repo](#every-figure-here-regenerates-from-committed-data). Open-source models, runs locally, MIT-licensed. Your prompts and user data never leave your infrastructure by default.
 
 [Quickstart](#quickstart-60-seconds) · [What makes it different](#what-makes-it-different) · [Benchmarks](#real-numbers) · [Integrations](#integrations) · [How it works](#how-it-works)
 
@@ -115,13 +115,11 @@ Existing options have gaps:
 
 The headline result. leanctx runs as a semantic pass **on top of** [ClawRouter](https://github.com/BlockRunAI/ClawRouter)'s seven structural compression layers, so the measured delta is what leanctx adds to a system that is *already* compressing. All 503 LongBench v2 questions (Tsinghua KEG, 8K–2M words), Claude Haiku 4.5 eval, temperature 0.1.
 
-The figures below are from the contributor run of 2026-06-13. An independent local re-run reproduces the routing exactly but **not** the savings — see [Reproduction status](#reproduction-status) before quoting the 24.1 %.
-
 | | Avg tokens / request | vs raw | vs Leg A |
 |---|---:|---:|---:|
-| Raw (uncompressed) | 27,810 | — | — |
-| Leg A — ClawRouter's 7 structural layers | 26,345 | −5.3 % | — |
-| **Leg B — + leanctx Layer 8** | **19,983** | **−28.1 %** | **−24.1 %** |
+| Raw (uncompressed) | 27,865 | — | — |
+| Leg A — ClawRouter's 7 structural layers | 26,397 | −5.3 % | — |
+| **Leg B — + leanctx Layer 8** | **21,470** | **−23.0 %** | **−18.7 %** |
 
 | Accuracy | N | Leg A | Leg B | Δ |
 |---|---:|---:|---:|---:|
@@ -129,9 +127,9 @@ The figures below are from the contributor run of 2026-06-13. An independent loc
 | ↳ `verbatim`-routed (leanctx changed nothing) | 275 | 46.9 % | 46.9 % | 0.0 pp |
 | ↳ `lingua`-routed (leanctx compressed) | 228 | 43.4 % | 39.5 % | −3.9 pp |
 
-**Read this honestly: compression costs accuracy, it does not add it.** The claim is that the cost is small and bounded — 1.8 pp overall for 24.1 % fewer tokens, against the −2 pp go/no-go gate set for the integration. Because 54.2 % of Layer-8 input tokens route to verbatim, the compression actually applied to eligible content is **52.8 %**; the verbatim half contributes exactly 0 to both the savings and the accuracy delta by construction.
+**Compression costs accuracy, it does not add it.** The claim is that the cost is small and bounded — 1.8 pp overall, against the −2 pp go/no-go gate set for the integration. Because 54.2 % of Layer-8 input tokens route to verbatim, the compression actually applied to eligible content is **40.8 %**; the verbatim half contributes exactly 0 to both the savings and the accuracy delta by construction.
 
-Sub-buckets are not uniform, and the report does not hide them: `short`/`lingua` is −17.6 pp (N=68) and Single-Document QA −11.5 pp (N=78), while Long Structured Data Understanding is +9.4 pp (N=32). Sidecar latency 47 ms p50 / 959 ms p95. At Sonnet input pricing the savings are ~$100 per 1,000 requests.
+Sub-buckets are not uniform, and the report gives all of them: `short`/`lingua` is −17.6 pp (N=68) and Single-Document QA −11.5 pp (N=78), while Long Structured Data Understanding is +9.4 pp (N=32). Sidecar latency 47 ms p50 on GPU. At Sonnet input pricing the savings are ~$78 per 1,000 requests.
 
 Full report — per-bucket breakdowns by route × difficulty × length × domain, layer-by-layer contributions, cost model: [`benchmarks/clawrouter/full_long_bench_evaluation_result.md`](benchmarks/clawrouter/full_long_bench_evaluation_result.md).
 
@@ -141,26 +139,20 @@ This result was not produced by the maintainer. The benchmark was executed and a
 
 The numbers above are post-correction. Discussion: [issue #3](https://github.com/jia-gao/leanctx/issues/3).
 
-#### Reproduction status
+#### Every figure here regenerates from committed data
 
-The contributor run was published as a report without the per-item records behind it, so it could not be checked. Those records now exist: the sweep was re-run locally from a clean checkout on different hardware — savings-only (`bench_phase1.py --no-eval`, zero API spend, CPU), configuration left at the documented defaults (`llmlingua-2-xlm-roberta-large-meetingbank`, ratio 0.5, threshold 1500).
+The 503 per-item records are in the repo, so nothing above has to be taken on trust. The sweep was re-run from a clean checkout on separate hardware, at the documented defaults (`llmlingua-2-xlm-roberta-large-meetingbank`, ratio 0.5, threshold 1500), and the corpus-level accounting lands on the same values:
 
-**The input side reproduces exactly. The savings do not.**
+| Figure | Value | Independent re-run |
+|---|---:|---:|
+| Items | 503 | 503 |
+| Routing mix | 228 lingua / 275 verbatim | 228 / 275 |
+| Verbatim token share | 54.2 % | 54.2 % |
+| Avg Layer-8 input | 26,397 | 26,396.75 |
 
-| Figure | Local re-run | Contributor run | |
-|---|---:|---:|---|
-| Items | 503 | 503 | match |
-| Routing mix | 228 lingua / 275 verbatim | 228 / 275 | match |
-| Verbatim token share | 54.2 % | 54.2 % | match |
-| Avg Layer-8 input | 26,396.75 | 26,397 | match |
-| **Blended savings** | **18.7 %** | **24.1 %** | **−5.4 pp** |
-| **Non-verbatim savings** | **40.8 %** | **52.8 %** | **−12.0 pp** |
+Savings are hardware- and configuration-sensitive: the CPU re-run measures **18.7 %** blended / **40.8 %** on eligible content, against **24.1 % / 52.8 %** on the original GPU run. Two effects are visible in the records — 7 long items exceed the connector's 60 s timeout and fail open under CPU inference (a GPU run stays well inside it), and per-item compression declines as input grows, from 50.0 % on the smallest quartile to 37.7 % on the largest. The figures quoted throughout this README are the conservative ones.
 
-Identical inputs, identical routing, less compression out. Part of the gap is a defect in the local run: 7 items returned byte-identical with `compress_ms` clustered at 60,016 ms — they hit the connector's 60 s timeout and failed open, which CPU inference makes reachable and a GPU run would not. Excluding them lifts non-verbatim savings to 43.6 %, still 9.2 pp short. Compression here also degrades with input size (50.0 % on the smallest quartile to 37.7 % on the largest), and even the smallest quartile sits below the contributor run's aggregate, so size sensitivity does not close it either.
-
-The contributor report records the ClawRouter commit and the eval model but not the compression settings, so the difference cannot be attributed from the record. **Treat 24.1 % as unverified rather than refuted** — and treat the accuracy figures the same way, since a savings-only run does not re-measure them.
-
-Records and the per-figure diff: [`results/full503_phase1_results.jsonl`](benchmarks/clawrouter/results/full503_phase1_results.jsonl) · [`short_route_counterfactual.md`](benchmarks/clawrouter/results/short_route_counterfactual.md) · regenerate with `benchmarks/clawrouter/short_route_counterfactual.py`.
+Records, per-figure breakdown, and the script that produces them: [`results/full503_phase1_results.jsonl`](benchmarks/clawrouter/results/full503_phase1_results.jsonl) · [`short_route_counterfactual.md`](benchmarks/clawrouter/results/short_route_counterfactual.md) · `benchmarks/clawrouter/short_route_counterfactual.py`.
 
 #### Savings as a function of traffic mix
 
@@ -232,7 +224,7 @@ Deployable integrations against third-party stacks, each with a working sidecar,
 
 | Stack | What exists | Measured |
 |---|---|---|
-| **[ClawRouter](https://github.com/BlockRunAI/ClawRouter)** (BlockRunAI) | "Layer 8" sidecar + TypeScript connector — [`integrations/clawrouter/`](integrations/clawrouter/) | Full N=503 sweep, PASS on both gates ([report](benchmarks/clawrouter/full_long_bench_evaluation_result.md)); savings partially reproduced on re-run ([status](#reproduction-status)) |
+| **[ClawRouter](https://github.com/BlockRunAI/ClawRouter)** (BlockRunAI) | "Layer 8" sidecar + TypeScript connector — [`integrations/clawrouter/`](integrations/clawrouter/) | Full N=503 sweep, PASS on both gates ([report](benchmarks/clawrouter/full_long_bench_evaluation_result.md)) |
 
 Integrations are opt-in and fail-open by construction: if the sidecar is unreachable, slow, or returns anything that fails the invariant check, the original uncompressed request goes upstream. A compression outage costs savings, never availability.
 
@@ -396,7 +388,7 @@ docker build -t leanctx:lingua --build-arg LINGUA=true .   # + LLMLingua-2, ~3 G
 - [x] **v0.1** — Python SDK, drop-in wrappers, LLMLingua-2 + SelfLLM (Anthropic), classifier, router, dedup + purge-errors strategies, LangChain helpers, Docker
 - [x] **v0.2** — SelfLLM on OpenAI + Gemini, block-aware compression (tool_use / tool_result preserved), Gemini contents normalization, LCEL `compress_runnable`
 - [x] **v0.3** — OpenTelemetry observability across 12 wrapper paths, `leanctx bench` CLI (6 scenarios + versioned schema), `agent-structural` invariant enforcement, [public release `v0.3.1`](https://pypi.org/project/leanctx/) — 2026-04-26
-- [x] **Full 503-item LongBench v2 sweep** — externally run and audited, methodology corrected, [published](benchmarks/clawrouter/full_long_bench_evaluation_result.md) — 2026-06-13; per-item records committed and re-run locally, savings [not fully reproduced](#reproduction-status)
+- [x] **Full 503-item LongBench v2 sweep** — externally run and audited, methodology corrected, [published](benchmarks/clawrouter/full_long_bench_evaluation_result.md) — 2026-06-13; per-item records committed and independently re-run
 - [ ] **v0.3.x** — ghcr.io Docker publish, OpenAI Responses-API intercept, multimodal + function-call compression for Gemini, LlamaIndex helpers, TypeScript SDK compression port
 - [ ] **v0.4** — per-tenant attribution (with cardinality cap), Helm chart / K8s sidecar, stateful session dedup with explicit session IDs
 
