@@ -15,7 +15,7 @@ from openai import OpenAI
 from leanctx import OpenAI  # same interface, compressed requests
 ```
 
-Measured on the full **[LongBench v2](https://longbench2.github.io/)** set (N=503), layered on top of an existing production compressor: **24.1 % additional tokens removed for 1.8 pp of accuracy** — 47 ms p50. Open-source models, runs locally, MIT-licensed. Your prompts and user data never leave your infrastructure by default.
+On the full **[LongBench v2](https://longbench2.github.io/)** set (N=503), layered on top of a compressor that is already running, leanctx removes **an extra 18.7 % of tokens** — rising to **36.7 % on prose-heavy traffic** — for a measured 1.8 pp of accuracy. Per-item records are in the repo, and [not every published figure reproduces](#reproduction-status). Open-source models, runs locally, MIT-licensed. Your prompts and user data never leave your infrastructure by default.
 
 [Quickstart](#quickstart-60-seconds) · [What makes it different](#what-makes-it-different) · [Benchmarks](#real-numbers) · [Integrations](#integrations) · [How it works](#how-it-works)
 
@@ -115,6 +115,8 @@ Existing options have gaps:
 
 The headline result. leanctx runs as a semantic pass **on top of** [ClawRouter](https://github.com/BlockRunAI/ClawRouter)'s seven structural compression layers, so the measured delta is what leanctx adds to a system that is *already* compressing. All 503 LongBench v2 questions (Tsinghua KEG, 8K–2M words), Claude Haiku 4.5 eval, temperature 0.1.
 
+The figures below are from the contributor run of 2026-06-13. An independent local re-run reproduces the routing exactly but **not** the savings — see [Reproduction status](#reproduction-status) before quoting the 24.1 %.
+
 | | Avg tokens / request | vs raw | vs Leg A |
 |---|---:|---:|---:|
 | Raw (uncompressed) | 27,810 | — | — |
@@ -138,6 +140,44 @@ Full report — per-bucket breakdowns by route × difficulty × length × domain
 This result was not produced by the maintainer. The benchmark was executed and audited by outside contributors ([@YingjingLu](https://github.com/YingjingLu), [@QianXiaoMoRan9](https://github.com/QianXiaoMoRan9)). An audit of an earlier draft showed that a headline "+7.4 % on long context" was **eval noise rather than a compression effect** — 7 of the 8 net improved items came from the verbatim subset, where the input was byte-identical (McNemar p = 0.143). Two methodology fixes followed ([#7](https://github.com/jia-gao/leanctx/pull/7)): Leg B now reuses Leg A's answer whenever the compressed context is byte-identical, so verbatim items contribute Δ = 0 by construction instead of decoder noise, and eval temperature dropped to 0.1. A separate correction forced a letter choice in the closed-book control, which had been scoring 6 % — below the 25 % random floor for 4-way multiple choice — and inflating apparent context lift.
 
 The numbers above are post-correction. Discussion: [issue #3](https://github.com/jia-gao/leanctx/issues/3).
+
+#### Reproduction status
+
+The contributor run was published as a report without the per-item records behind it, so it could not be checked. Those records now exist: the sweep was re-run locally from a clean checkout on different hardware — savings-only (`bench_phase1.py --no-eval`, zero API spend, CPU), configuration left at the documented defaults (`llmlingua-2-xlm-roberta-large-meetingbank`, ratio 0.5, threshold 1500).
+
+**The input side reproduces exactly. The savings do not.**
+
+| Figure | Local re-run | Contributor run | |
+|---|---:|---:|---|
+| Items | 503 | 503 | match |
+| Routing mix | 228 lingua / 275 verbatim | 228 / 275 | match |
+| Verbatim token share | 54.2 % | 54.2 % | match |
+| Avg Layer-8 input | 26,396.75 | 26,397 | match |
+| **Blended savings** | **18.7 %** | **24.1 %** | **−5.4 pp** |
+| **Non-verbatim savings** | **40.8 %** | **52.8 %** | **−12.0 pp** |
+
+Identical inputs, identical routing, less compression out. Part of the gap is a defect in the local run: 7 items returned byte-identical with `compress_ms` clustered at 60,016 ms — they hit the connector's 60 s timeout and failed open, which CPU inference makes reachable and a GPU run would not. Excluding them lifts non-verbatim savings to 43.6 %, still 9.2 pp short. Compression here also degrades with input size (50.0 % on the smallest quartile to 37.7 % on the largest), and even the smallest quartile sits below the contributor run's aggregate, so size sensitivity does not close it either.
+
+The contributor report records the ClawRouter commit and the eval model but not the compression settings, so the difference cannot be attributed from the record. **Treat 24.1 % as unverified rather than refuted** — and treat the accuracy figures the same way, since a savings-only run does not re-measure them.
+
+Records and the per-figure diff: [`results/full503_phase1_results.jsonl`](benchmarks/clawrouter/results/full503_phase1_results.jsonl) · [`short_route_counterfactual.md`](benchmarks/clawrouter/results/short_route_counterfactual.md) · regenerate with `benchmarks/clawrouter/short_route_counterfactual.py`.
+
+#### Savings as a function of traffic mix
+
+The 503-item corpus is 45.8 % prose by token share, and blended savings scale linearly with that share — LLMLingua-2 is deterministic and extractive, so reweighting the per-item records to any target mix is exact arithmetic rather than resampling:
+
+```
+blended_savings(p) = p × r        p = prose token-share,  r = 40.8 % (95 % CI 37.8–43.7)
+```
+
+| Traffic mix | Prose share | Blended savings |
+|---|---:|---:|
+| Code-heavy agent traffic | 0.25 | 10.2 % |
+| This corpus | 0.458 | 18.7 % |
+| Balanced | 0.50 | 20.4 % |
+| Prose-heavy (docs, RAG, transcripts) | 0.90 | 36.7 % |
+
+So "what will leanctx save me?" has one honest answer: it depends on how much of your traffic is prose, and the curve above tells you. Full curve and CSV: [`prose_code_savings_curve.md`](benchmarks/clawrouter/results/prose_code_savings_curve.md).
 
 ### Ablation vs naive truncation — 15 items, directional
 
@@ -192,7 +232,7 @@ Deployable integrations against third-party stacks, each with a working sidecar,
 
 | Stack | What exists | Measured |
 |---|---|---|
-| **[ClawRouter](https://github.com/BlockRunAI/ClawRouter)** (BlockRunAI) | "Layer 8" sidecar + TypeScript connector — [`integrations/clawrouter/`](integrations/clawrouter/) | ✅ Full N=503 sweep, PASS on both gates ([report](benchmarks/clawrouter/full_long_bench_evaluation_result.md)) |
+| **[ClawRouter](https://github.com/BlockRunAI/ClawRouter)** (BlockRunAI) | "Layer 8" sidecar + TypeScript connector — [`integrations/clawrouter/`](integrations/clawrouter/) | Full N=503 sweep, PASS on both gates ([report](benchmarks/clawrouter/full_long_bench_evaluation_result.md)); savings partially reproduced on re-run ([status](#reproduction-status)) |
 
 Integrations are opt-in and fail-open by construction: if the sidecar is unreachable, slow, or returns anything that fails the invariant check, the original uncompressed request goes upstream. A compression outage costs savings, never availability.
 
@@ -356,7 +396,7 @@ docker build -t leanctx:lingua --build-arg LINGUA=true .   # + LLMLingua-2, ~3 G
 - [x] **v0.1** — Python SDK, drop-in wrappers, LLMLingua-2 + SelfLLM (Anthropic), classifier, router, dedup + purge-errors strategies, LangChain helpers, Docker
 - [x] **v0.2** — SelfLLM on OpenAI + Gemini, block-aware compression (tool_use / tool_result preserved), Gemini contents normalization, LCEL `compress_runnable`
 - [x] **v0.3** — OpenTelemetry observability across 12 wrapper paths, `leanctx bench` CLI (6 scenarios + versioned schema), `agent-structural` invariant enforcement, [public release `v0.3.1`](https://pypi.org/project/leanctx/) — 2026-04-26
-- [x] **Full 503-item LongBench v2 sweep** — externally run and audited, methodology corrected, [published](benchmarks/clawrouter/full_long_bench_evaluation_result.md) — 2026-06-13
+- [x] **Full 503-item LongBench v2 sweep** — externally run and audited, methodology corrected, [published](benchmarks/clawrouter/full_long_bench_evaluation_result.md) — 2026-06-13; per-item records committed and re-run locally, savings [not fully reproduced](#reproduction-status)
 - [ ] **v0.3.x** — ghcr.io Docker publish, OpenAI Responses-API intercept, multimodal + function-call compression for Gemini, LlamaIndex helpers, TypeScript SDK compression port
 - [ ] **v0.4** — per-tenant attribution (with cardinality cap), Helm chart / K8s sidecar, stateful session dedup with explicit session IDs
 
