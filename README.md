@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/pypi/l/leanctx)](LICENSE)
 
 **Drop-in prompt compression for production LLM applications.**
-Cut your input-token bill by 10–40%， without sacrificing accuracy.
+Cut your input-token bill by 10–40%，without sacrificing accuracy.
 
 ```python
 # before
