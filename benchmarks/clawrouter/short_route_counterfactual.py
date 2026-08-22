@@ -166,7 +166,8 @@ def main(argv: list[str] | None = None) -> int:
     rows = [
         check("Items", float(n), float(PUBLISHED["n_items"]), 0),
         check("Routed to lingua", float(routes.get("lingua", 0)), float(PUBLISHED["n_lingua"]), 0),
-        check("Routed to verbatim", float(routes.get("verbatim", 0)), float(PUBLISHED["n_verbatim"]), 0),
+        check("Routed to verbatim", float(routes.get("verbatim", 0)),
+              float(PUBLISHED["n_verbatim"]), 0),
         check("Verbatim token share", verbatim_share, PUBLISHED["verbatim_share"], 0.005),
         check("Blended savings", blended, PUBLISHED["blended_savings"], 0.005),
         check("Non-verbatim savings", nonverb, PUBLISHED["nonverbatim_savings"], 0.005),
@@ -228,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     items_lost_all = round(oa["n"] * (oa["leg_a"] - oa["leg_b"]) / 100)
     cf_correct_b = round(oa["n"] * oa["leg_b"] / 100) + items_lost_short
     cf_acc_b = cf_correct_b / oa["n"] * 100
-    A(f"| | N | Leg A | Leg B | Δ |")
+    A("| | N | Leg A | Leg B | Δ |")
     A("|---|---:|---:|---:|---:|")
     A(f"| short / lingua | {n_s} | {a_s} % | {b_s} % | {b_s - a_s:+.1f} pp |")
     A(f"| overall (as shipped) | {oa['n']} | {oa['leg_a']} % | {oa['leg_b']} % | "
