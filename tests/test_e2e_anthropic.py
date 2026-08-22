@@ -1,9 +1,17 @@
 """End-to-end integration tests against the real anthropic SDK.
 
-Uses respx to mock the HTTP call, so we exercise every layer — the real
-anthropic.Anthropic client, httpx, our intercept wrappers — without a
-real API key or network access. If this passes, the drop-in claim
+Mocks at the transport layer, so we exercise every layer — the real
+``anthropic.Anthropic`` client, its HTTP stack, our intercept wrappers —
+without a real API key or network access. If this passes, the drop-in claim
 (``from leanctx import Anthropic``) actually holds.
+
+These tests deliberately do **not** use respx. anthropic 1.0 moved its
+transport from ``httpx`` to ``httpx2``; respx patches ``httpx``, so under 1.0
+it silently stops intercepting and the "mocked" calls become real network
+calls that fail on auth. Binding the mock to whichever HTTP library the
+installed SDK actually imported keeps these tests honest across both
+generations — and makes a future transport swap fail loudly rather than
+quietly escaping to the network.
 """
 
 from __future__ import annotations
@@ -15,12 +23,26 @@ from typing import Any
 import pytest
 
 ANTHROPIC_AVAILABLE = importlib.util.find_spec("anthropic") is not None
-RESPX_AVAILABLE = importlib.util.find_spec("respx") is not None
 
 pytestmark = pytest.mark.skipif(
-    not (ANTHROPIC_AVAILABLE and RESPX_AVAILABLE),
-    reason="anthropic and respx are required for e2e tests",
+    not ANTHROPIC_AVAILABLE,
+    reason="anthropic is required for e2e tests",
 )
+
+
+def _http_mod() -> Any:
+    """The HTTP library the installed anthropic SDK is built on.
+
+    anthropic >= 1.0 uses httpx2, earlier releases use httpx. Read it off the
+    SDK rather than guessing, so the mock transport is the exact type its
+    client will accept even when both libraries are installed.
+    """
+    import anthropic._base_client as base
+
+    mod = getattr(base, "httpx2", None) or getattr(base, "httpx", None)
+    if mod is None:  # pragma: no cover - only if the SDK restructures again
+        pytest.skip("cannot determine the anthropic SDK's HTTP library")
+    return mod
 
 
 def _response_body(text: str = "hi back", model: str = "claude-sonnet-4-6") -> dict[str, Any]:
@@ -41,21 +63,40 @@ def _response_body(text: str = "hi back", model: str = "claude-sonnet-4-6") -> d
     }
 
 
-def test_anthropic_wrapper_returns_real_response_shape() -> None:
-    import respx
-    from httpx import Response
+class _Recorder:
+    """Captures the requests the SDK actually put on the wire."""
 
+    def __init__(self, body: dict[str, Any]) -> None:
+        self._body = body
+        self.requests: list[Any] = []
+
+    @property
+    def called(self) -> bool:
+        return bool(self.requests)
+
+    def sent_json(self, index: int = 0) -> dict[str, Any]:
+        return json.loads(self.requests[index].content)
+
+    def client(self) -> Any:
+        http = _http_mod()
+
+        def handler(request: Any) -> Any:
+            self.requests.append(request)
+            return http.Response(200, json=self._body)
+
+        return http.Client(transport=http.MockTransport(handler))
+
+
+def test_anthropic_wrapper_returns_real_response_shape() -> None:
     from leanctx import Anthropic
 
-    with respx.mock(base_url="https://api.anthropic.com") as mock:
-        mock.post("/v1/messages").mock(return_value=Response(200, json=_response_body()))
-
-        client = Anthropic(api_key="sk-test")
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=10,
-            messages=[{"role": "user", "content": "hi"}],
-        )
+    rec = _Recorder(_response_body())
+    client = Anthropic(api_key="sk-test", http_client=rec.client())
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=10,
+        messages=[{"role": "user", "content": "hi"}],
+    )
 
     # Real anthropic response shape flowed through untouched.
     assert response.model == "claude-sonnet-4-6"
@@ -64,20 +105,15 @@ def test_anthropic_wrapper_returns_real_response_shape() -> None:
 
 
 def test_leanctx_telemetry_attached_to_usage() -> None:
-    import respx
-    from httpx import Response
-
     from leanctx import Anthropic
 
-    with respx.mock(base_url="https://api.anthropic.com") as mock:
-        mock.post("/v1/messages").mock(return_value=Response(200, json=_response_body()))
-
-        client = Anthropic(api_key="sk-test")
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=10,
-            messages=[{"role": "user", "content": "hi"}],
-        )
+    rec = _Recorder(_response_body())
+    client = Anthropic(api_key="sk-test", http_client=rec.client())
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=10,
+        messages=[{"role": "user", "content": "hi"}],
+    )
 
     # Passthrough mode still attaches the three leanctx_* fields so
     # downstream observability pipelines see a uniform shape.
@@ -94,31 +130,25 @@ def test_pipeline_runs_when_mode_is_on() -> None:
     match input. The test verifies the pipeline actually executed — the
     leanctx_method on the response is "verbatim", not "passthrough".
     """
-    import respx
-    from httpx import Response
-
     from leanctx import Anthropic
 
-    with respx.mock(base_url="https://api.anthropic.com") as mock:
-        route = mock.post("/v1/messages").mock(
-            return_value=Response(200, json=_response_body(text="ok"))
-        )
+    rec = _Recorder(_response_body(text="ok"))
+    client = Anthropic(
+        api_key="sk-test",
+        http_client=rec.client(),
+        leanctx_config={"mode": "on", "trigger": {"threshold_tokens": 0}},
+    )
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=10,
+        messages=[{"role": "user", "content": "prose message through pipeline"}],
+    )
 
-        client = Anthropic(
-            api_key="sk-test",
-            leanctx_config={"mode": "on", "trigger": {"threshold_tokens": 0}},
-        )
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=10,
-            messages=[{"role": "user", "content": "prose message through pipeline"}],
-        )
-
-    assert route.called
+    assert rec.called
     # The HTTP body our wrapper sent upstream still has the original
     # message — Verbatim didn't alter content — but it passed through
     # our pipeline, which is what we set out to prove.
-    sent = json.loads(route.calls[0].request.content)
+    sent = rec.sent_json()
     assert len(sent["messages"]) == 1
     assert sent["messages"][0]["role"] == "user"
 
@@ -127,19 +157,22 @@ def test_pipeline_runs_when_mode_is_on() -> None:
 
 def test_custom_base_url_honored() -> None:
     """Users on Bedrock, Vertex, or a proxy pass base_url through."""
-    import respx
-    from httpx import Response
-
     from leanctx import Anthropic
 
-    with respx.mock(base_url="https://proxy.example.com") as mock:
-        mock.post("/v1/messages").mock(return_value=Response(200, json=_response_body()))
-
-        client = Anthropic(api_key="sk-test", base_url="https://proxy.example.com")
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=10,
-            messages=[{"role": "user", "content": "hi"}],
-        )
+    rec = _Recorder(_response_body())
+    client = Anthropic(
+        api_key="sk-test",
+        base_url="https://proxy.example.com",
+        http_client=rec.client(),
+    )
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=10,
+        messages=[{"role": "user", "content": "hi"}],
+    )
 
     assert response.content[0].text == "hi back"
+    # The override actually reached the wire rather than defaulting to
+    # api.anthropic.com — that is the whole point of the parameter.
+    assert rec.called
+    assert str(rec.requests[0].url).startswith("https://proxy.example.com")

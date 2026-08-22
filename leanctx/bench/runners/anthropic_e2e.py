@@ -1,9 +1,10 @@
-"""Runner: anthropic-e2e — full leanctx.Anthropic + middleware path,
-respx-mocked Anthropic API.
+"""Runner: anthropic-e2e — full leanctx.Anthropic + middleware path against a
+transport-mocked Anthropic API.
 
 Exercises the wrapper → middleware → compressor → upstream stack
-without hitting the real Anthropic API. Requires the ``[bench]`` extra
-(for respx) and the ``[anthropic]`` extra.
+without hitting the real Anthropic API. Requires the ``[anthropic]`` extra.
+The mock is injected into the client as an HTTP transport, so it holds for
+both anthropic < 1.0 (httpx) and >= 1.0 (httpx2).
 """
 
 from __future__ import annotations
@@ -35,21 +36,36 @@ def _mock_anthropic_response() -> dict[str, Any]:
     }
 
 
+def _sdk_http_module() -> Any:
+    """The HTTP library the installed anthropic SDK is built on.
+
+    anthropic >= 1.0 moved its transport to ``httpx2``; earlier releases use
+    ``httpx``. Read it off the SDK instead of importing a fixed name, so the
+    mock transport is the type its client accepts under either generation.
+
+    This scenario used to mock with respx, which patches ``httpx`` globally.
+    Under anthropic 1.0 that patch no longer applies, and the "mocked"
+    benchmark would have issued a **real** request to api.anthropic.com with a
+    placeholder key. Injecting the transport into the client cannot silently
+    escape to the network that way.
+    """
+    import anthropic._base_client as base  # noqa: PLC0415
+
+    mod = getattr(base, "httpx2", None) or getattr(base, "httpx", None)
+    if mod is None:  # pragma: no cover - only if the SDK restructures again
+        raise RuntimeError(
+            "cannot determine the anthropic SDK's HTTP library; "
+            "the anthropic-e2e scenario cannot mock it safely"
+        )
+    return mod
+
+
 @register(
     "anthropic-e2e",
-    description="Full leanctx.Anthropic stack with respx-mocked Anthropic API.",
-    required_extras=("anthropic", "bench"),
+    description="Full leanctx.Anthropic stack against a mocked Anthropic API.",
+    required_extras=("anthropic",),
 )
 def run(*, workload: str, **opts: object) -> BenchRecord:
-    try:
-        import respx  # noqa: PLC0415
-        from httpx import Response  # noqa: PLC0415
-    except ImportError as exc:
-        raise RuntimeError(
-            "the [bench] extra is required for the anthropic-e2e scenario. "
-            "Install with: pip install 'leanctx[bench]'"
-        ) from exc
-
     try:
         from leanctx import Anthropic  # noqa: PLC0415
     except ImportError as exc:
@@ -58,24 +74,25 @@ def run(*, workload: str, **opts: object) -> BenchRecord:
             "Install with: pip install 'leanctx[anthropic]'"
         ) from exc
 
+    http = _sdk_http_module()
+    body = _mock_anthropic_response()
+
+    def _handler(request: Any) -> Any:
+        return http.Response(200, json=body)
+
     messages = load_workload(workload)
     t0 = time.perf_counter()
-    with respx.mock(
-        base_url="https://api.anthropic.com", assert_all_called=False
-    ) as mock:
-        mock.post("/v1/messages").mock(
-            return_value=Response(200, json=_mock_anthropic_response())
-        )
-        client = Anthropic(
-            api_key="sk-test",
-            leanctx_config={
-                "mode": "on",
-                "trigger": {"threshold_tokens": 100},
-            },
-        )
-        resp = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=10, messages=messages
-        )
+    client = Anthropic(
+        api_key="sk-test",
+        http_client=http.Client(transport=http.MockTransport(_handler)),
+        leanctx_config={
+            "mode": "on",
+            "trigger": {"threshold_tokens": 100},
+        },
+    )
+    resp = client.messages.create(
+        model="claude-sonnet-4-6", max_tokens=10, messages=messages
+    )
     duration_ms = int((time.perf_counter() - t0) * 1000)
 
     usage = resp.usage
