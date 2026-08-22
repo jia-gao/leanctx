@@ -86,7 +86,11 @@ dev = [
     "build>=1.0",
     "twine>=5.0",
     "tiktoken>=0.7",
-    "anthropic>=0.40.0",
+    # anthropic 1.0 moved its transport to httpx2, which respx (an httpx-1
+    # library) cannot intercept — the mocked e2e tests would silently issue
+    # real network calls and fail on auth. Cap the *test* pin until respx
+    # supports httpx2; the runtime extra is deliberately left unbounded.
+    "anthropic>=0.40.0,<1.0",
     "respx>=0.21.0",
     "opentelemetry-api>=1.30,<2.0",
     "opentelemetry-sdk>=1.30,<2.0",
